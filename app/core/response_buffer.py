@@ -19,10 +19,13 @@ Key Features:
 Design Principle: Encapsulate all response state in one place.
 """
 
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,6 +76,12 @@ class ResponseBuffer:
     # Regex pattern for QUICK_REPLIES extraction
     QUICK_REPLIES_PATTERN = re.compile(
         r'\[QUICK_REPLIES\](.*?)\[/QUICK_REPLIES\]',
+        re.DOTALL | re.IGNORECASE
+    )
+
+    # FALLBACK: Unclosed tag (truncation recovery) - BUG FIX v2.0
+    QUICK_REPLIES_UNCLOSED_PATTERN = re.compile(
+        r'\[QUICK_REPLIES\](.*?)$',
         re.DOTALL | re.IGNORECASE
     )
 
@@ -362,7 +371,7 @@ class ResponseBuffer:
 
             replies = []
 
-            # Try primary pattern first
+            # Try primary pattern first (closed tag)
             match = self.QUICK_REPLIES_PATTERN.search(self._text)
             if match:
                 content = match.group(1).strip()
@@ -370,13 +379,22 @@ class ResponseBuffer:
                 # Remove from text
                 self._text = self.QUICK_REPLIES_PATTERN.sub('', self._text).strip()
             else:
-                # Try fallback Georgian pattern
-                match = self.QUICK_REPLIES_FALLBACK_PATTERN.search(self._text)
+                # FALLBACK 1: Unclosed tag (handles truncation) - BUG FIX v2.0
+                match = self.QUICK_REPLIES_UNCLOSED_PATTERN.search(self._text)
                 if match:
+                    logger.warning("⚠️ Quick replies tag was truncated, using fallback extraction")
                     content = match.group(1).strip()
                     replies = self._parse_reply_content(content)
                     # Remove from text
-                    self._text = self.QUICK_REPLIES_FALLBACK_PATTERN.sub('', self._text).strip()
+                    self._text = self.QUICK_REPLIES_UNCLOSED_PATTERN.sub('', self._text).strip()
+                else:
+                    # FALLBACK 2: Georgian format pattern
+                    match = self.QUICK_REPLIES_FALLBACK_PATTERN.search(self._text)
+                    if match:
+                        content = match.group(1).strip()
+                        replies = self._parse_reply_content(content)
+                        # Remove from text
+                        self._text = self.QUICK_REPLIES_FALLBACK_PATTERN.sub('', self._text).strip()
 
             self._quick_replies = replies
             self._quick_replies_extracted = True

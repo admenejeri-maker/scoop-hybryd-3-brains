@@ -1102,3 +1102,78 @@ Add 4 sections after line 23 (after ალერგიები):
 ---
 
 *Last Updated: January 22, 2026 ~21:03*
+
+---
+
+## Development Timeline: January 22, 2026 (Night Session ~22:30-22:55)
+
+### Session: Post-Launch Bug Fixes (Quick Replies + EmptyResponseError)
+
+**Problems Reported:**
+1. **Quick Replies truncation:** When Gemini output truncated, `[QUICK_REPLIES]` tag has no closing tag → extraction fails
+2. **EmptyResponseError (Over-Reasoning):** Gemini 3 continues calling `search_products` despite query limit reached → 5 rounds → empty response
+
+---
+
+## Bug Log (January 22 - Night Session)
+
+### Bug #27: Quick Replies Truncation Recovery (BACKEND)
+- **Symptom:** Quick replies not extracted when Gemini output truncated mid-tag
+- **Root Cause:** `QUICK_REPLIES_PATTERN` regex required closing tag `[/QUICK_REPLIES]`
+- **Fix (Two-Phase Fallback):**
+  1. Primary: Try closed tag pattern `[QUICK_REPLIES]...[/QUICK_REPLIES]`
+  2. Fallback 1: Try unclosed pattern `[QUICK_REPLIES]...$` (handles truncation)
+  3. Fallback 2: Georgian pattern `შემდეგი ნაბიჯი:`
+- **Location:** `response_buffer.py` L78-83, L370-390
+- **Status:** ✅ RESOLVED
+
+### Bug #28: EmptyResponseError from Over-Reasoning Loop (BACKEND)
+- **Symptom:** Gemini 3 kept calling `search_products` even after query limit, causing 5 rounds → empty response
+- **Root Cause:** Query limit response used passive `"note"` field which Gemini ignored
+- **Fix:** Replaced with forceful Georgian directive:
+  ```python
+  "status": "SEARCH_COMPLETE",
+  "instruction": "⛔ საძიებო ლიმიტი ამოიწურა. აღარ გამოიძახო search_products! დაწერე რეკომენდაცია ახლავე."
+  ```
+- **Location:** `tool_executor.py` L248-259
+- **Status:** ✅ RESOLVED
+
+### Bug #29: Quick Replies SSE Event Data Mismatch (FRONTEND)
+- **Symptom:** Quick replies always showing static defaults despite backend sending dynamic ones
+- **Investigation:** curl test confirmed backend sends `quick_replies` SSE event correctly
+- **Root Cause:** Frontend `Chat.tsx` L536 used `data.content` but backend sends `data.replies`
+- **Fix:**
+  ```typescript
+  // Before (broken)
+  quickReplies = data.content.map(...)
+  // After (fixed)
+  const repliesData = data.replies || data.content || [];
+  ```
+- **Location:** `Chat.tsx` L535-541
+- **Status:** ✅ RESOLVED
+
+---
+
+## Key Code Changes (January 22 - Night Session)
+
+| Location | Change |
+|----------|--------|
+| `response_buffer.py` L78-83 | Added `QUICK_REPLIES_UNCLOSED_PATTERN` |
+| `response_buffer.py` L370-390 | Two-phase fallback extraction logic |
+| `tool_executor.py` L248-259 | Forceful `instruction` directive |
+| `Chat.tsx` L535-541 | Fixed `data.replies` vs `data.content` |
+| `tests/core/test_bug_fixes_v2.py` | 9 test cases (5 QR + 3 Limit + 1 Integration) |
+
+---
+
+## Test Results (January 22 - Night Session)
+
+```
+pytest tests/ -v
+194/195 passed (1 pre-existing failure unrelated to bug fixes)
+9/9 bug fix tests passed ✅
+```
+
+---
+
+*Last Updated: January 22, 2026 ~22:55*

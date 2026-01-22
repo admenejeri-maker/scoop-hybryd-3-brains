@@ -248,7 +248,14 @@ class ToolExecutor:
                 response={
                     "products": self._all_products,
                     "count": len(self._all_products),
-                    "note": f"Query limit reached, returning existing results",
+                    # CRITICAL: Forceful directive to stop searching - BUG FIX v2.0
+                    "status": "SEARCH_COMPLETE",
+                    "instruction": (
+                        f"⛔ საძიებო ლიმიტი ამოიწურა. "
+                        f"ნაპოვნია {len(self._all_products)} პროდუქტი. "
+                        f"აღარ გამოიძახო search_products! "
+                        f"დაწერე რეკომენდაცია ახლავე ამ პროდუქტების საფუძველზე."
+                    ),
                 },
                 products=self._all_products,
                 skipped=True,
