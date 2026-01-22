@@ -385,7 +385,10 @@ class ConversationEngine:
 
             # Set buffer state from loop results
             buffer.set_text(state.accumulated_text)
+            # DEBUG: Log products before adding to buffer
+            logger.info(f"📊 DEBUG: state.all_products has {len(state.all_products)} products")
             buffer.add_products(state.all_products)
+            logger.info(f"📊 DEBUG: buffer now has {buffer.get_product_count()} products")
 
             # Phase 6: Extract tip and quick replies
             buffer.extract_and_set_tip()
@@ -398,13 +401,18 @@ class ConversationEngine:
 
             # Phase 8: Yield final results
             snapshot = buffer.snapshot()
+            logger.info(f"📊 DEBUG: snapshot.products has {len(snapshot.products)} products")
+            logger.info(f"📊 DEBUG: snapshot.products truthy: {bool(snapshot.products)}")
 
             # Yield text
             yield SSEEvent("text", {"content": snapshot.text})
 
             # Yield products
             if snapshot.products:
-                yield SSEEvent("products", {"products": snapshot.products})
+                logger.info(f"📊 DEBUG: Yielding products SSE event with {len(snapshot.products)} products")
+                # Format products as markdown for frontend injection
+                formatted_products = self._format_products_markdown(snapshot.products)
+                yield SSEEvent("products", {"content": formatted_products})
 
             # Yield tip
             if snapshot.tip:
@@ -794,6 +802,42 @@ class ConversationEngine:
             fc: FunctionCall object
         """
         logger.debug(f"Function call detected: {fc.name}")
+
+    def _format_products_markdown(self, products: List[Dict[str, Any]]) -> str:
+        """
+        Format products as markdown for frontend display.
+
+        Creates product cards with name, brand, price, and URL.
+
+        Args:
+            products: List of product dicts
+
+        Returns:
+            Markdown-formatted string
+        """
+        if not products:
+            return ""
+
+        lines = []
+        for p in products[:5]:  # Limit to first 5 products
+            name = p.get("name", "პროდუქტი")
+            brand = p.get("brand", "")
+            price = p.get("price", 0)
+            url = p.get("url", "")
+            servings = p.get("servings")
+
+            # Calculate price per serving if available
+            price_per = f" · {price/servings:.2f} ₾/პორცია" if servings and price else ""
+
+            lines.append(f"**{name}**")
+            if brand:
+                lines.append(f"*{brand}*")
+            lines.append(f"**{price} ₾**{price_per}")
+            if url:
+                lines.append(f"[შეიძინე]({url})")
+            lines.append("")  # Empty line between products
+
+        return "\n".join(lines)
 
 
 # =============================================================================

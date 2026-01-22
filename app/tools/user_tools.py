@@ -579,10 +579,12 @@ def search_products(
         # Skip $text entirely and go straight to $regex - more reliable
         # NOTE: $text search has cold start issues (returns 0 on first call)
         # $regex is slower but consistent
-        products = []  # Skip $text, let $regex handle it
+        # FIX: Don't reset products here - vector search results should persist!
+        # products = []  # REMOVED: This was nullifying vector search results!
 
-        # === Phase 2: Fallback to $regex if $text found nothing ===
+        # === Phase 2: Fallback to $regex ONLY if vector search found nothing ===
         if not products:
+            logger.info(f"🔄 Vector search returned 0, falling back to regex for '{query}'")
             # Build MongoDB $or conditions for EACH search term
             or_conditions = []
             for term in search_terms:
