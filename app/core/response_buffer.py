@@ -362,7 +362,7 @@ class ResponseBuffer:
 
             replies = []
 
-            # Try primary pattern first (with closing tag)
+            # Try primary pattern first
             match = self.QUICK_REPLIES_PATTERN.search(self._text)
             if match:
                 content = match.group(1).strip()
@@ -370,21 +370,13 @@ class ResponseBuffer:
                 # Remove from text
                 self._text = self.QUICK_REPLIES_PATTERN.sub('', self._text).strip()
             else:
-                # Fallback 1: Unclosed [QUICK_REPLIES] tag (Gemini truncation issue)
-                unclosed_match = re.search(r'\[QUICK_REPLIES\](.*?)$', self._text, re.DOTALL | re.IGNORECASE)
-                if unclosed_match:
-                    content = unclosed_match.group(1).strip()
+                # Try fallback Georgian pattern
+                match = self.QUICK_REPLIES_FALLBACK_PATTERN.search(self._text)
+                if match:
+                    content = match.group(1).strip()
                     replies = self._parse_reply_content(content)
-                    # Remove from text (unclosed tag pattern)
-                    self._text = re.sub(r'\[QUICK_REPLIES\].*$', '', self._text, flags=re.DOTALL | re.IGNORECASE).strip()
-                else:
-                    # Fallback 2: Georgian pattern
-                    match = self.QUICK_REPLIES_FALLBACK_PATTERN.search(self._text)
-                    if match:
-                        content = match.group(1).strip()
-                        replies = self._parse_reply_content(content)
-                        # Remove from text
-                        self._text = self.QUICK_REPLIES_FALLBACK_PATTERN.sub('', self._text).strip()
+                    # Remove from text
+                    self._text = self.QUICK_REPLIES_FALLBACK_PATTERN.sub('', self._text).strip()
 
             self._quick_replies = replies
             self._quick_replies_extracted = True
