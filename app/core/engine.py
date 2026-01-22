@@ -389,7 +389,9 @@ class ConversationEngine:
 
             # Phase 6: Extract tip and quick replies
             buffer.extract_and_set_tip()
-            buffer.parse_quick_replies()
+            qr_result = buffer.parse_quick_replies()
+            if qr_result:
+                logger.info(f"🎯 Quick replies parsed: {len(qr_result)} items")
 
             # Phase 7: Yield completion thinking event
             completion_event = thinking_manager.get_completion_event()
