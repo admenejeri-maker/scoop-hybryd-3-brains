@@ -72,7 +72,7 @@ RETRY_EXCEPTIONS = (
 class GeminiConfig:
     """Configuration for GeminiAdapter."""
     model_name: str = "gemini-3-flash-preview"
-    temperature: float = 0.7
+    temperature: float = 1.0  # Gemini 3 recommended default
     top_p: float = 0.95
     top_k: int = 40
     max_output_tokens: int = 8192

@@ -91,6 +91,13 @@ class Settings(BaseModel):
         default_factory=lambda: os.getenv("THINKING_LEVEL", "MEDIUM")
     )
 
+    # Temperature for generation (Gemini 3 recommended: 1.0)
+    # NOTE: Google recommends NOT changing from 1.0 for Gemini 3 models
+    # as lower values can cause unexpected behavior in math/reasoning tasks
+    temperature: float = Field(
+        default_factory=lambda: float(os.getenv("TEMPERATURE", "1.0"))
+    )
+
     # Vector Search Configuration
     # Embedding model for semantic product search (768-dim, matches description_embedding)
     embedding_model: str = Field(

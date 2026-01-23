@@ -393,7 +393,7 @@ class SessionManager:
                 chat_config = GenerateContentConfig(
                     tools=self.tools,
                     safety_settings=self.safety_settings if settings.enable_safety_settings else None,
-                    temperature=0.7,
+                    temperature=settings.temperature,  # Gemini 3 recommended: 1.0
                     top_p=0.95,
                     top_k=40,
                     max_output_tokens=settings.max_output_tokens,
@@ -423,7 +423,7 @@ class SessionManager:
                     system_instruction=self.system_instruction,
                     tools=self.tools,
                     safety_settings=self.safety_settings if settings.enable_safety_settings else None,
-                    temperature=0.7,
+                    temperature=settings.temperature,  # Gemini 3 recommended: 1.0
                     top_p=0.95,
                     top_k=40,
                     max_output_tokens=settings.max_output_tokens,

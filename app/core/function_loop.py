@@ -329,10 +329,19 @@ class FunctionCallingLoop:
         # Determine result type
         accumulated_text = "".join(text_parts)
 
-        if accumulated_text.strip():
-            result = RoundResult.COMPLETE
-        elif function_calls:
+        # Bug #27 Fix: FC ALWAYS takes priority over prelude text
+        # When Gemini emits both text AND function call, the text is a "prelude"
+        # (interrupted thought), not the final answer. Execute FC, discard prelude.
+        if function_calls:
             result = RoundResult.CONTINUE
+            if accumulated_text.strip():
+                logger.info(
+                    f"⚠️ Discarding prelude text ({len(accumulated_text)} chars) "
+                    f"in favor of {len(function_calls)} function call(s)"
+                )
+                accumulated_text = ""  # Clear prelude
+        elif accumulated_text.strip():
+            result = RoundResult.COMPLETE
         else:
             result = RoundResult.EMPTY
 
@@ -655,10 +664,19 @@ class FunctionCallingLoop:
 
         accumulated_text = "".join(text_parts)
 
-        if accumulated_text.strip():
-            result = RoundResult.COMPLETE
-        elif function_calls:
+        # Bug #27 Fix: FC ALWAYS takes priority over prelude text
+        # When Gemini emits both text AND function call, the text is a "prelude"
+        # (interrupted thought), not the final answer. Execute FC, discard prelude.
+        if function_calls:
             result = RoundResult.CONTINUE
+            if accumulated_text.strip():
+                logger.info(
+                    f"⚠️ Discarding prelude text ({len(accumulated_text)} chars) "
+                    f"in favor of {len(function_calls)} function call(s)"
+                )
+                accumulated_text = ""  # Clear prelude
+        elif accumulated_text.strip():
+            result = RoundResult.COMPLETE
         else:
             result = RoundResult.EMPTY
 

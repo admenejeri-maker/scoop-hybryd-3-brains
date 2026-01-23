@@ -1296,3 +1296,165 @@ INFO - 🔄 Streaming round 1/5
 
 *Last Updated: January 23, 2026 ~00:55*
 
+---
+
+## Development Timeline: January 23, 2026 (Night Session ~02:20-02:30)
+
+### Session: Bug #27 - Text Truncation During Function Calls
+
+**Problem Reported:** Text ends mid-word in UI (e.g., `"გასაგებია... ე.წ. "პარდ"` instead of full response).
+
+---
+
+## Bug Log (January 23)
+
+### Bug #27: Text Truncation When FC and Text Coexist (CRITICAL)
+- **Symptom:** UI shows partial text that ends mid-word
+- **Debug Method:** `/debug` workflow + curl testing
+- **Evidence Collection:**
+  1. Frontend DevTools: `[DEBUG SSE] text` truncated in logs
+  2. curl test: Some requests had NO `event: text` at all
+  3. Backend logs: Products found, but text empty
+- **Root Cause Discovery (via Analysis):**
+  - When Gemini emits **both text AND function call** in single response:
+    - `text_parts = ["შენთვის პროტეინის..."]` (prelude)
+    - `function_calls = [FC(search_products)]`
+  - Old logic (`function_loop.py` L329-337):
+    ```python
+    if accumulated_text.strip():      # ← Text wins
+        result = RoundResult.COMPLETE # ← FC silently dropped!
+    elif function_calls:
+        result = RoundResult.CONTINUE
+    ```
+  - **Result:** Loop exits immediately, FC never executes, user sees incomplete "prelude" text
+- **Fix Strategy:** "Discard Prelude, Execute FC"
+  - FC ALWAYS takes priority over text
+  - Prelude text (incomplete thought) is discarded
+  - Loop continues to execute FC
+  - Final text comes from later round after FC results
+- **Locations Modified:**
+  | Location | Change |
+  |----------|--------|
+  | `function_loop.py` L329-347 | FC priority + prelude discard (sync) |
+  | `function_loop.py` L656-679 | FC priority + prelude discard (async) |
+- **Code Change:**
+  ```python
+  # NEW: FC ALWAYS takes priority
+  if function_calls:
+      result = RoundResult.CONTINUE
+      if accumulated_text.strip():
+          logger.info(f"⚠️ Discarding prelude text ({len(accumulated_text)} chars)")
+          accumulated_text = ""  # Clear prelude
+  elif accumulated_text.strip():
+      result = RoundResult.COMPLETE
+  else:
+      result = RoundResult.EMPTY
+  ```
+- **Status:** ✅ RESOLVED
+
+---
+
+## Key Code Changes (January 23 - Night)
+
+| Location | Change | Impact |
+|----------|--------|--------|
+| `function_loop.py` L329-347 | FC priority in sync method | No more dropped FCs |
+| `function_loop.py` L656-679 | FC priority in streaming method | No more truncated text |
+
+---
+
+## Verification
+
+- **Unit Tests:** 22/22 passed (no regression) ✅
+- **curl Test:** `event: text` now present in responses ✅
+- **Pattern:** Prelude text discarded, FC executes, final text complete
+
+---
+
+## Learnings From This Session
+
+1. **Gemini Dual Output:** Gemini can emit text AND function call simultaneously - the text is a "prelude" (interrupted thought), not the answer.
+2. **Priority Matters:** FC must always take priority to ensure search/lookup executes.
+3. **Discard vs Concatenate:** Discarding prelude prevents "double text" artifacts.
+
+---
+
+*Last Updated: January 23, 2026 ~02:30*
+
+---
+
+## Development Timeline: January 23, 2026 (Late Night Session ~02:30-03:10)
+
+### Session: Bug #27 Verification + Short Response Investigation
+
+**Problem Reported:** UI ზოგჯერ აჩვენებს მოკლე ტექსტს ("გამარ" ან "გიორგი" მხოლოდ).
+
+---
+
+## Debugging Summary
+
+### Bug #27 Fix - Verified Working ✅
+
+**curl tests confirm backend sends full text:**
+- Query: "გამარჯობა" → Full 600+ char response ✅
+- Query: "პროტეინი მაინტერესებს" → Full response with products ✅
+
+**Browser Subagent Verification:**
+- Manual fetch interception showed complete SSE stream
+- No network-level truncation detected
+
+---
+
+### New Issue Identified: Short First-Response (OPEN)
+
+**Symptom:** ახალი session-ის პირველ query-ზე მოკლე პასუხი:
+```
+[DEBUG SSE] text გიორგი  ← Only 7 chars!
+[DEBUG SSE] text გამარჯობა გიორგი!  ← Only 19 chars!
+```
+
+**Pattern:**
+| Request | Response | Problem |
+|---------|----------|---------|
+| New session, 1st query | "გამარჯობა გიორგი!" | Very short |
+| Same session, 2nd+ query | Full 300+ word response | OK ✅ |
+
+**Root Cause Analysis:**
+1. New session = `history_len=0`
+2. Frontend sends random `convId`, backend creates new `session_xxx`
+3. Gemini sees empty history + profile only
+4. System prompt (L82-83): `"პირველ მესიჯზე მოკლედ უპასუხე"`
+5. Gemini interprets "short first response" literally → greeting only
+
+**Identified Fix Location:**
+```
+prompts/system_prompt_lean.py L80-84:
+## მისალმება
+"სალამი" = გამარჯობა (არა პროდუქტი!)
+პირველ მესიჯზე მოკლედ უპასუხე, შემდეგ პირდაპირ საქმეზე.
+```
+
+**Proposed Fix (TODO):**
+დააზუსტე რომ "მოკლედ" ეხება მხოლოდ greeting-ს, არა profile/info queries-ს:
+```
+"რა იცი ჩემზე?" = სრულად ჩამოთვალე profile info
+```
+
+**Status:** 🟡 OPEN - ხვალ გასასწორებელი
+
+---
+
+## Other Issues Found
+
+### MongoDB Save Error (Non-Critical)
+```
+ERROR - Failed to save history: 'NoneType' object is not iterable
+```
+- Occurs sporadically on session save
+- Does not affect user response
+- **Status:** 🟡 OPEN
+
+---
+
+*Last Updated: January 23, 2026 ~03:10*
+
