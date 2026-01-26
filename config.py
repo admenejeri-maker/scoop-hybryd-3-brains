@@ -36,7 +36,7 @@ class Settings(BaseModel):
     # Question #5: Rate Limits for Gemini 2.5 Flash:
     # - Free tier: 15 RPM, 1M TPM, 1500 RPD
     # - Paid tier: 2000 RPM, 4M TPM (standard), scales with billing
-    model_name: str = "gemini-3-flash-preview"  # Gemini 3 Flash Preview
+    model_name: str = "gemini-2.5-flash"  # Migrated from gemini-3-flash-preview for stable safety settings
 
     # Session & Memory
     # Question #1: Memory Persistence - Session TTL
@@ -77,10 +77,10 @@ class Settings(BaseModel):
         default_factory=lambda: int(os.getenv("MAX_FUNCTION_CALLS", "5"))
     )
 
-    # Gemini Thinking Configuration (for real-time thought streaming)
-    # BALANCED: 8192 = focused reasoning with LOW level for speed
+    # Gemini 2.5 Thinking Configuration (uses thinking_budget, not thinking_level)
+    # HIGH: 16384 tokens = deep reasoning for complex queries
     thinking_budget: int = Field(
-        default_factory=lambda: int(os.getenv("THINKING_BUDGET", "8192"))  # Balanced reasoning
+        default_factory=lambda: int(os.getenv("THINKING_BUDGET", "16384"))  # HIGH = Deep reasoning
     )
     include_thoughts: bool = Field(
         default_factory=lambda: os.getenv("INCLUDE_THOUGHTS", "true").lower() == "true"  # Re-enabled

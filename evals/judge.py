@@ -58,7 +58,7 @@ class LLMJudge:
         # Initialize Gemini client
         from google import genai
         self.client = genai.Client(api_key=self.api_key)
-        self.model = "gemini-3-flash-preview"  # Same model as main Scoop AI
+        self.model = "gemini-2.5-flash"  # Migrated from gemini-3-flash-preview
         
     def evaluate(
         self,

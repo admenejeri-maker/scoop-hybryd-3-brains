@@ -398,7 +398,7 @@ class SessionManager:
                     top_k=40,
                     max_output_tokens=settings.max_output_tokens,
                     thinking_config=ThinkingConfig(
-                        thinking_level=settings.thinking_level
+                        thinking_budget=settings.thinking_budget  # Gemini 2.5 uses budget, not level
                     ),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
                         maximum_remote_calls=settings.max_function_calls
@@ -428,7 +428,7 @@ class SessionManager:
                     top_k=40,
                     max_output_tokens=settings.max_output_tokens,
                     thinking_config=ThinkingConfig(
-                        thinking_level=settings.thinking_level
+                        thinking_budget=settings.thinking_budget  # Gemini 2.5 uses budget, not level
                     ),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(
                         maximum_remote_calls=settings.max_function_calls
