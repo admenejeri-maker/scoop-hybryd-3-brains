@@ -491,7 +491,7 @@ class SessionManager:
 
             entry = {"role": role, "parts": []}
 
-            for part in content.parts:
+            for part in (content.parts or []):
                 if hasattr(part, 'text') and part.text:
                     entry["parts"].append({"text": part.text})
                 elif hasattr(part, 'function_call') and part.function_call:
@@ -890,7 +890,7 @@ def extract_search_products_results(response) -> list:
         # Access the chat history to find function responses
         # The response object has candidates with content parts
         for candidate in response.candidates:
-            for part in candidate.content.parts:
+            for part in (candidate.content.parts or []):
                 # Check for function response in part
                 if hasattr(part, 'function_response') and part.function_response:
                     func_resp = part.function_response

@@ -329,17 +329,22 @@ class FunctionCallingLoop:
         # Determine result type
         accumulated_text = "".join(text_parts)
 
-        # Bug #27 Fix: FC ALWAYS takes priority over prelude text
-        # When Gemini emits both text AND function call, the text is a "prelude"
-        # (interrupted thought), not the final answer. Execute FC, discard prelude.
+        # Bug #27 Fix (REVISED): Only discard SHORT prelude text with FC
+        # Original fix was too aggressive - discarded ALL text
+        # Now: Keep text if > 50 chars (likely real response, not just "მომიცადეთ...")
         if function_calls:
             result = RoundResult.CONTINUE
-            if accumulated_text.strip():
+            if accumulated_text.strip() and len(accumulated_text) < 50:
                 logger.info(
-                    f"⚠️ Discarding prelude text ({len(accumulated_text)} chars) "
+                    f"⚠️ Discarding short prelude text ({len(accumulated_text)} chars) "
                     f"in favor of {len(function_calls)} function call(s)"
                 )
-                accumulated_text = ""  # Clear prelude
+                accumulated_text = ""  # Clear only short prelude
+            elif accumulated_text.strip():
+                logger.info(
+                    f"📝 Keeping substantial text ({len(accumulated_text)} chars) with "
+                    f"{len(function_calls)} function call(s)"
+                )
         elif accumulated_text.strip():
             result = RoundResult.COMPLETE
         else:
@@ -629,6 +634,8 @@ class FunctionCallingLoop:
         text_parts: List[str] = []
         function_calls: List[FunctionCall] = []
         thoughts: List[str] = []
+        chunk_count = 0  # DEBUG: Track chunk count
+        last_finish_reason = None  # DEBUG: Track finish reason
 
         try:
             # Get stream
@@ -636,12 +643,15 @@ class FunctionCallingLoop:
 
             # Process chunks as they arrive
             async for chunk in stream:
+                chunk_count += 1  # DEBUG: Count chunks
+                
                 if hasattr(chunk, 'candidates') and chunk.candidates:
                     candidate = chunk.candidates[0]
                     
                     # Log finish reason if present
                     if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
-                        logger.debug(f"Chunk finish_reason: {candidate.finish_reason}")
+                        last_finish_reason = str(candidate.finish_reason)
+                        logger.info(f"🏁 DEBUG: Chunk #{chunk_count} finish_reason: {last_finish_reason}")
 
                     if hasattr(candidate, 'content') and candidate.content:
                         # DEFENSIVE: Check parts is not None before iterating
@@ -654,6 +664,15 @@ class FunctionCallingLoop:
                                     function_calls,
                                     thoughts,
                                 )
+                else:
+                    logger.debug(f"🔍 DEBUG: Chunk #{chunk_count} has no candidates")
+
+            # DEBUG: Log final accumulation stats
+            logger.info(
+                f"📦 DEBUG: Stream complete - chunks={chunk_count}, "
+                f"text_parts={len(text_parts)}, total_chars={sum(len(p) for p in text_parts)}, "
+                f"finish_reason={last_finish_reason}"
+            )
 
         except Exception as e:
             logger.error(f"Streaming round error: {e}", exc_info=True)
@@ -664,17 +683,22 @@ class FunctionCallingLoop:
 
         accumulated_text = "".join(text_parts)
 
-        # Bug #27 Fix: FC ALWAYS takes priority over prelude text
-        # When Gemini emits both text AND function call, the text is a "prelude"
-        # (interrupted thought), not the final answer. Execute FC, discard prelude.
+        # Bug #27 Fix (REVISED): Only discard SHORT prelude text with FC
+        # Original fix was too aggressive - discarded ALL text
+        # Now: Keep text if > 50 chars (likely real response, not just "მომიცადეთ...")
         if function_calls:
             result = RoundResult.CONTINUE
-            if accumulated_text.strip():
+            if accumulated_text.strip() and len(accumulated_text) < 50:
                 logger.info(
-                    f"⚠️ Discarding prelude text ({len(accumulated_text)} chars) "
+                    f"⚠️ Discarding short prelude text ({len(accumulated_text)} chars) "
                     f"in favor of {len(function_calls)} function call(s)"
                 )
-                accumulated_text = ""  # Clear prelude
+                accumulated_text = ""  # Clear only short prelude
+            elif accumulated_text.strip():
+                logger.info(
+                    f"📝 Keeping substantial text ({len(accumulated_text)} chars) with "
+                    f"{len(function_calls)} function call(s)"
+                )
         elif accumulated_text.strip():
             result = RoundResult.COMPLETE
         else:

@@ -424,7 +424,7 @@ class ConversationStore:
                 "parts": []
             }
 
-            for part in content.parts:
+            for part in (content.parts or []):
                 if hasattr(part, "text") and part.text:
                     entry["parts"].append({"text": part.text})
                 elif hasattr(part, "function_call") and part.function_call:

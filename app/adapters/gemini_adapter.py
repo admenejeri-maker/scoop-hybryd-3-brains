@@ -265,7 +265,7 @@ class GeminiAdapter:
 
             entry = {"role": role, "parts": []}
 
-            if hasattr(content, 'parts'):
+            if hasattr(content, 'parts') and content.parts:
                 for part in content.parts:
                     # Text parts
                     if hasattr(part, 'text') and part.text:

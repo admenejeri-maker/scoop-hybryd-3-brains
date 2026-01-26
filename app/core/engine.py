@@ -133,9 +133,17 @@ class SSEEvent:
         parses JSON and checks data.type, not the SSE event: header.
         """
         import json
+        import logging
         # Merge type into data for frontend compatibility
         payload = {"type": self.event_type, **self.data}
-        return f"event: {self.event_type}\ndata: {json.dumps(payload)}\n\n"
+        json_str = json.dumps(payload, ensure_ascii=False)  # Keep UTF-8
+        sse_str = f"event: {self.event_type}\ndata: {json_str}\n\n"
+        # DEBUG: Log SSE output for text events
+        if self.event_type == "text":
+            content = self.data.get("content", "")
+            logging.info(f"📡 SSE TEXT: len={len(content)}, json_len={len(json_str)}, sse_len={len(sse_str)}")
+            logging.info(f"📡 SSE TEXT preview: {content[:100]}...")
+        return sse_str
 
 
 # =============================================================================
@@ -465,9 +473,12 @@ class ConversationEngine:
             snapshot = buffer.snapshot()
             logger.info(f"📊 DEBUG: snapshot.products has {len(snapshot.products)} products")
             logger.info(f"📊 DEBUG: snapshot.products truthy: {bool(snapshot.products)}")
+            logger.info(f"📊 DEBUG: snapshot.text length: {len(snapshot.text)} chars")
+            logger.info(f"📊 DEBUG: snapshot.text preview: {snapshot.text[:200] if snapshot.text else '[EMPTY]'}...")
 
             # Yield text
             yield SSEEvent("text", {"content": snapshot.text})
+
 
             # Yield products
             if snapshot.products:

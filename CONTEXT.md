@@ -1452,9 +1452,390 @@ ERROR - Failed to save history: 'NoneType' object is not iterable
 ```
 - Occurs sporadically on session save
 - Does not affect user response
-- **Status:** 🟡 OPEN
+- **Status:** ✅ FIXED (see Bug #26)
 
 ---
 
 *Last Updated: January 23, 2026 ~03:10*
+
+---
+
+## Development Timeline: January 26, 2026 (Evening Session ~22:30-22:50)
+
+### Session: NoneType Crash Fix (Bug #26)
+
+**Problem Reported:** 
+- Gemini responses cut off mid-sentence
+- MongoDB history save failing with `TypeError: 'NoneType' object is not iterable`
+
+---
+
+## Bug Log (January 26)
+
+### Bug #26: NoneType Crash on content.parts Iteration (CRITICAL)
+- **Symptom:** 
+  1. პასუხი იჭრებოდა შუა წინადადებაში
+  2. ლოგებში: `ERROR - Failed to save history: 'NoneType' object is not iterable`
+- **Investigation Method:** `/opus-planning` + `/claude-building` + `/test-sprite` workflows
+- **Discovery Method:** Source code analysis with grep_search
+
+**Root Cause Discovery:**
+- Gemini SDK can return `Content` objects with `parts=None`
+- 4 locations in codebase iterated on `content.parts` without null check
+- When `parts=None`, Python throws `TypeError: 'NoneType' object is not iterable`
+
+**Affected Locations:**
+
+| File | Line | Code | Status |
+|------|------|------|--------|
+| `function_loop.py` | 308, 648 | `if parts is not None:` | ✅ Already Fixed |
+| `mongo_store.py` | 427 | `for part in content.parts:` | ❌ BUG |
+| `gemini_adapter.py` | 268 | `if hasattr(content, 'parts'):` | ❌ BUG |
+| `main.py` | 494 | `for part in content.parts:` | ❌ BUG |
+| `main.py` | 893 | `for part in candidate.content.parts:` | ❌ BUG |
+
+**Fix Applied (4 locations):**
+
+```python
+# Pattern 1: Using `or []` for safe iteration
+# BEFORE (Bug)
+for part in content.parts:
+
+# AFTER (Fixed)
+for part in (content.parts or []):
+```
+
+```python
+# Pattern 2: Adding null check to hasattr
+# BEFORE (Bug)
+if hasattr(content, 'parts'):
+
+# AFTER (Fixed)
+if hasattr(content, 'parts') and content.parts:
+```
+
+**Files Modified:**
+
+| Location | Change |
+|----------|--------|
+| `app/memory/mongo_store.py` L427 | `(content.parts or [])` |
+| `app/adapters/gemini_adapter.py` L268 | `and content.parts` |
+| `main.py` L494 | `(content.parts or [])` |
+| `main.py` L893 | `(candidate.content.parts or [])` |
+
+**Verification:**
+- ✅ Syntax check passed (py_compile)
+- ✅ Unit tests: 8/8 passed
+- ✅ Test file created: `tests/test_nonetype_crash_fix.py`
+
+**Confidence:** 97% - Follows proven pattern from `function_loop.py`
+
+- **Status:** ✅ RESOLVED
+
+---
+
+## Learnings From This Session
+
+1. **Gemini SDK Inconsistency:** SDK can return `Content.parts = None` even in successful responses.
+2. **Defensive Programming:** Always use `(parts or [])` pattern when iterating SDK objects.
+3. **Pattern Reuse:** `function_loop.py` already had the fix - should have applied same pattern everywhere.
+4. **Test-Sprite Workflow:** Creating standalone tests without pytest is useful for quick verification.
+
+---
+
+*Last Updated: January 26, 2026 ~22:50*
+
+---
+
+## Development Timeline: January 26, 2026 (Late Night Session ~23:00-23:55)
+
+### Session: SSE Text Cutoff Bug - Non-Deterministic Response Truncation
+
+**Problem Reported:** AI responses randomly cut off mid-sentence. Backend logs show full text (1837 chars), but frontend displays only ~100 chars. This was **non-deterministic** - same query could work or fail.
+
+---
+
+## Bug Log (January 26 - Late Night)
+
+### Bug #22: SSE Event Boundary Parsing (PARTIAL FIX)
+- **Symptom:** Response text truncated at random positions
+- **Initial Hypothesis:** SSE events split across network chunks on single `\n`
+- **Attempted Fix:** Changed `buffer.split('\n')` to `buffer.split('\n\n')` for proper SSE event boundaries
+- **Location:** `frontend/src/components/Chat.tsx` lines 456-480
+- **Result:** ❌ Partial improvement but still non-deterministic
+- **Status:** 🔶 SUPERSEDED by Bug #23
+
+### Bug #23: TextDecoder Stream Flush (ROOT CAUSE FIX)
+- **Symptom:** Same as Bug #22 - random text truncation
+- **Deep Investigation (via Claude Code handoff):**
+  1. Backend logs confirmed: `📡 SSE TEXT: len=1837` - full text sent ✅
+  2. Frontend console showed: `[DEBUG SSE] text გამარჯობა... შ` - only ~55 chars ❌
+  3. Analysis revealed: `TextDecoder.decode(value, { stream: true })` buffers incomplete UTF-8 sequences
+  4. Georgian characters = 3 bytes each, chunk boundaries can split mid-character
+  5. When `done=true`, original code immediately `break` - losing buffered bytes
+  
+- **Root Cause Discovery (via MDN Documentation):**
+  > "When streaming mode is enabled, the decoder will buffer incomplete byte sequences between calls. 
+  > When finished, call decode() with no arguments to flush any remaining bytes."
+  
+  Source: https://developer.mozilla.org/en-US/docs/Web/API/TextDecoder/decode#stream
+
+- **Fix (2 changes in Chat.tsx):**
+
+```typescript
+// Location 1: Lines 468-474 - Add final flush
+if (done) {
+    buffer += decoder.decode(); // Final flush - no arguments
+}
+
+// Location 2: Line 596 - Move break to END of loop
+// (after processing the flushed buffer)
+if (done) break;
+```
+
+- **Why Non-Deterministic:**
+  - Network chunks are random sizes (TCP packet fragmentation)
+  - Sometimes full UTF-8 character fits in chunk → works ✅
+  - Sometimes chunk boundary splits mid-character → bytes lost ❌
+  - Georgian UTF-8 (3 bytes) more likely to split than ASCII (1 byte)
+
+- **Location:** `frontend/src/components/Chat.tsx` lines 468-474, 596
+- **Status:** ✅ RESOLVED
+
+---
+
+## Key Code Changes (January 26 Late Night)
+
+| Location | Change | Impact |
+|----------|--------|--------|
+| `Chat.tsx` L468-474 | Added `decoder.decode()` flush on stream end | Recovers buffered UTF-8 bytes |
+| `Chat.tsx` L596 | Moved `if (done) break;` to after buffer processing | Ensures final events are processed |
+| `engine.py` L135-149 | Added `ensure_ascii=False` to JSON serialization | Preserves UTF-8 (minor improvement) |
+| `engine.py` L143-148 | Added SSE debug logging `📡 SSE TEXT: len=X` | Better diagnostics |
+
+---
+
+## Additional Fixes This Session
+
+### Port Mismatch Fix
+- **Issue:** Frontend `.env.local` had `BACKEND_URL=http://localhost:8000`
+- **Reality:** Backend runs on port `8080`
+- **Fix:** Updated `.env.local` to use port `8080`
+- **Status:** ✅ RESOLVED
+
+---
+
+## Technical Pattern: TextDecoder Streaming Best Practice
+
+```typescript
+// ❌ WRONG - Loses buffered bytes when stream ends
+const decoder = new TextDecoder();
+while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;  // ← EXIT BEFORE FLUSH = DATA LOSS
+    buffer += decoder.decode(value, { stream: true });
+}
+
+// ✅ CORRECT - Properly flushes buffered bytes
+const decoder = new TextDecoder();
+while (true) {
+    const { done, value } = await reader.read();
+    if (value) {
+        buffer += decoder.decode(value, { stream: true });
+    }
+    if (done) {
+        buffer += decoder.decode();  // ← FLUSH remaining bytes
+    }
+    // ... process buffer ...
+    if (done) break;  // ← EXIT AFTER FLUSH
+}
+```
+
+---
+
+## Learnings From This Session
+
+1. **TextDecoder Stream Mode:** `stream: true` buffers incomplete UTF-8 - MUST call `decode()` without args to flush.
+2. **Multi-Byte UTF-8 Risk:** Georgian (3 bytes), Emoji (4 bytes) more likely to split across chunks than ASCII.
+3. **Non-Deterministic Bugs:** When same input produces different results, look for network/timing-dependent code.
+4. **MDN is Truth:** Official docs explicitly state flush requirement - always check primary sources.
+5. **Claude Code Handoff:** Creating detailed handoff documents enables parallel debugging with other agents.
+
+---
+
+*Last Updated: January 26, 2026 ~23:55*
+
+---
+
+## Development Timeline: January 27, 2026 (Post-Midnight Deep Research ~00:00-00:35)
+
+### Session: Deep Research - Text Truncation Root Cause Analysis
+
+**Problem:** After applying Bug #22, #23 fixes, text STILL truncates randomly to 15 chars.
+
+---
+
+## Bug Log (January 27 - Post-Midnight)
+
+### Bug #24: Bug #27 Overcorrection (FIXED)
+- **Symptom:** Text responses truncated
+- **Root Cause:** Original Bug #27 fix discarded ALL text when function calls present
+- **Fix:** Changed to only discard short prelude (<50 chars)
+- **Location:** `function_loop.py` lines 332-351, 672-691
+- **Status:** ✅ RESOLVED
+
+### Bug #25: Gemini Streaming Partial Response (UNRESOLVED)
+- **Symptom:** Backend receives only 15 chars from Gemini, cut mid-word ("შე...")
+- **Investigation Results:**
+  1. HTTP 200 OK from Gemini API - no error
+  2. Backend code verified correct - text accumulation works
+  3. Frontend code verified correct - receives exactly what backend sends
+  4. Text cut mid-Georgian-word suggests stream ends prematurely
+
+- **Log Evidence:**
+```
+00:23:11 → history_len=72 → len=1179 ✅
+00:23:33 → history_len=30 → len=15 ❌
+```
+
+- **Root Cause Hypothesis:**
+  - Gemini `gemini-3-flash-preview` model sometimes returns partial streaming response with STOP
+  - No clear correlation with history length
+  - Non-deterministic - same query works sometimes, fails other times
+
+- **Location:** External - Gemini API behavior
+- **Status:** 🔶 INVESTIGATION ONGOING
+
+---
+
+## Deep Research Analysis Summary
+
+### Code Verification (All Correct ✅)
+
+| Component | File | Status |
+|-----------|------|--------|
+| Text Accumulation | `function_loop.py` L670 | ✅ Correct |
+| Bug #27 REVISED | `function_loop.py` L672-691 | ✅ Applied |
+| SSE Parsing | `Chat.tsx` L477 | ✅ Correct |
+| TextDecoder Flush | `Chat.tsx` L468-474 | ✅ Applied |
+
+### Evidence Trail
+
+```
+Frontend Console:
+[DEBUG SSE] text len=15 გიორგი, უნდა შე
+
+Backend Log:
+📊 snapshot.text length: 15 chars
+📡 SSE TEXT: len=15
+```
+
+**Conclusion:** Frontend receives exactly what Backend sends. Problem is upstream in Gemini.
+
+---
+
+## Recommended Next Steps for Bug #25
+
+1. **Diagnostic:** Add `finish_reason` logging in `function_loop.py` L648
+2. **Defensive:** Add retry logic if response < 30 chars with no function calls
+3. **Long-term:** Consider switching from `gemini-3-flash-preview` to stable model
+
+---
+
+## Technical Pattern: Gemini Streaming Response Validation
+
+```python
+# Proposed defensive pattern
+if len(accumulated_text) < 30 and not function_calls:
+    logger.warning(f"⚠️ Suspiciously short response: {len(accumulated_text)} chars")
+    # Consider: retry with same message
+```
+
+---
+
+## Learnings From This Session
+
+1. **Preview Models:** `gemini-3-flash-preview` may have unstable streaming behavior
+2. **Text Cut Mid-Word:** Strong indicator of stream interruption, not logic error
+3. **Deep Research Protocol:** Systematic analysis (Sequential Thinking → Code Analysis → Log Analysis) effective for complex bugs
+4. **HTTP 200 ≠ Success:** API can return 200 but deliver partial content
+
+---
+
+*Last Updated: January 27, 2026 ~00:35*
+
+---
+
+## Development Timeline: January 27, 2026 (~01:00-01:15)
+
+### Session: Deep Research & Migration Planning
+
+**Problem Solved:** Root cause analysis of text truncation identified `FinishReason.SAFETY` as culprit.
+
+---
+
+## Bug Log (Continued)
+
+### Bug #26: Gemini Safety Filter False Positives (SOLUTION FOUND)
+- **Symptom:** Legitimate content (lactose intolerance, sports nutrition) triggers SAFETY
+- **Root Cause:** `BLOCK_MEDIUM_AND_ABOVE` too strict for health/nutrition advice
+- **Evidence:** 
+  - "ლაქტოზის აუტანლობა" query → `FinishReason.SAFETY` → 84 chars
+  - Same query on Gemini 2.5 Flash → No safety trigger (OFF is default)
+- **Solution:** Migrate to `gemini-2.5-flash` where Safety is OFF by default
+- **Status:** ✅ SOLUTION IDENTIFIED, Migration Pending
+
+---
+
+## Migration Plan: gemini-3-flash-preview → gemini-2.5-flash
+
+### Why Migrate?
+
+| Feature | gemini-3-flash-preview | gemini-2.5-flash |
+|---------|----------------------|-----------------|
+| Status | Pre-GA | **GA** ✅ |
+| Safety Default | BLOCK_MEDIUM | **OFF** ✅ |
+| Thinking Config | thinking_level | thinking_budget |
+
+### Files to Modify
+
+1. **config.py** L39: `model_name: str = "gemini-2.5-flash"`
+2. **gemini_adapter.py** L74: `model_name: str = "gemini-2.5-flash"`
+3. **main.py** L401, L431: `thinking_level` → `thinking_budget`
+4. **evals/judge.py** L61: `self.model = "gemini-2.5-flash"`
+
+### Thinking Level → Budget Mapping
+
+| thinking_level | thinking_budget |
+|---------------|-----------------|
+| MINIMAL | 0 |
+| LOW | 4096 |
+| MEDIUM | 8192 |
+| HIGH | 16384 |
+
+---
+
+## Technical Research Summary
+
+### All FinishReason Values That Cause Truncation:
+
+| FinishReason | Cause | Solution |
+|-------------|-------|----------|
+| **SAFETY** | Content triggered harm filter | Lower threshold / Use 2.5 |
+| **MAX_TOKENS** | Response hit output limit | Increase max_output_tokens |
+| **RECITATION** | Copyright match | Rephrase content |
+| **STOP** | Normal completion | N/A (expected) |
+
+---
+
+## Learnings From This Session
+
+1. **GA > Preview:** Gemini 2.5 Flash (GA) more stable than 3 (Preview)
+2. **Safety OFF by Default:** Modern Gemini models designed safe without filters
+3. **Diagnostic Logging:** `finish_reason` logging revealed root cause instantly
+4. **Deep Research Protocol:** Systematic approach found solution in 45 minutes
+
+---
+
+*Last Updated: January 27, 2026 ~01:15*
 
