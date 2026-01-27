@@ -121,7 +121,7 @@ numpy==2.4.1
 openai==2.15.0
 opentelemetry-api==1.37.0
 opentelemetry-exporter-otlp-proto-common==1.37.0
-opentelemetry-exporter-otlp-proto-grpc==1.39.1
+opentelemetry-exporter-otlp-proto-grpc==1.37.0
 opentelemetry-exporter-otlp-proto-http==1.37.0
 opentelemetry-instrumentation==0.58b0
 opentelemetry-instrumentation-agno==0.50.1
