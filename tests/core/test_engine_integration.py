@@ -135,12 +135,14 @@ class MockGeminiAdapter:
         history: Optional[List] = None,
         tools: Optional[List] = None,
         system_instruction: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> MockChat:
         """Create mock chat session."""
         self.create_chat_calls.append({
             "history": history,
             "tools": tools,
             "system_instruction": system_instruction,
+            "model_override": model_override,
         })
         return MockChat(self.response_text)
 

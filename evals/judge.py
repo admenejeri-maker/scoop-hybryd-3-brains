@@ -58,7 +58,7 @@ class LLMJudge:
         # Initialize Gemini client
         from google import genai
         self.client = genai.Client(api_key=self.api_key)
-        self.model = "gemini-2.5-flash"  # Migrated from gemini-3-flash-preview
+        self.model = "gemini-2.5-pro"  # Stable GA model
         
     def evaluate(
         self,

@@ -533,6 +533,10 @@ class FunctionCallingLoop:
 
         if output.thoughts:
             self.state.all_thoughts.extend(output.thoughts)
+        
+        # Track finish_reason for SAFETY fallback detection
+        if output.finish_reason:
+            self.state.last_finish_reason = output.finish_reason
 
     def reset(self) -> None:
         """
@@ -709,4 +713,5 @@ class FunctionCallingLoop:
             text=accumulated_text,
             function_calls=function_calls,
             thoughts=thoughts,
+            finish_reason=last_finish_reason,
         )

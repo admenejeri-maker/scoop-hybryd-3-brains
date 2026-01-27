@@ -1839,3 +1839,500 @@ if len(accumulated_text) < 30 and not function_calls:
 
 *Last Updated: January 27, 2026 ~01:15*
 
+---
+
+## Development Timeline: January 27, 2026 (~12:00-18:00)
+
+### Session: Hybrid Inference Architecture Implementation
+
+**Problem Solved:** Gemini 3.0 Flash Preview არასტაბილურობა (503 errors, timeouts, ცარიელი პასუხები) - სრული fallback სისტემა შეიქმნა.
+
+---
+
+## Hybrid Inference Architecture (v3.0)
+
+### პრობლემა
+
+**Gemini 3.0 Flash Preview** - ძალიან კარგი მოდელია, მაგრამ არასტაბილური:
+- 503/500 errors დროდადრო
+- Timeout-ები
+- ცარიელი პასუხები
+- Safety filter false positives
+
+### გადაწყვეტა: 3-საფეხურიანი სათადარიგო სისტემა
+
+```
+🥇 Gemini 3.0 Flash Preview (პირველი)
+         ↓ თუ ჩაიშალა
+🥈 Gemini 2.5 Pro (დიდი კონტექსტი)
+         ↓ თუ ესეც ჩაიშალა
+🥉 Gemini 2.5 Flash (საიმედო fallback)
+```
+
+---
+
+## ახალი კომპონენტები
+
+### 1. CircuitBreaker (`app/core/circuit_breaker.py`)
+
+მოდელის "ჯანმრთელობის" tracking:
+
+```python
+# 5 წარუმატებელი მოთხოვნა → მოდელი "გამორთულია" 60 წამით
+circuit_failure_threshold: int = 5
+circuit_recovery_seconds: float = 60.0
+```
+
+**მდგომარეობები:**
+- `CLOSED` - მოდელი ჯანმრთელია, მოთხოვნები გადის
+- `OPEN` - მოდელი ჩაშლილია, მოთხოვნები აღარ გადის
+- `HALF_OPEN` - აღდგენის ტესტირება (2 წარმატება → CLOSED)
+
+**17 ტესტი ✅**
+
+### 2. TokenCounter (`app/core/token_counter.py`)
+
+კონტექსტის სიგრძის დათვლა:
+
+```python
+# 4 სიმბოლო = 1 ტოკენი (ლათინური)
+# Georgian unicude = 2.5x multiplier
+# Safety buffer = 1.1x
+tokens = (len(text) // 4) * 2.5 * 1.1
+```
+
+**16 ტესტი ✅**
+
+### 3. ModelRouter (`app/core/model_router.py`)
+
+ავტომატური routing ლოგიკა:
+
+```python
+if context_tokens < 100_000:
+    return PRIMARY  # gemini-3-flash-preview
+elif context_tokens < 1_000_000:
+    return EXTENDED  # gemini-2.5-pro
+else:
+    return FALLBACK  # gemini-2.5-flash
+```
+
+**13 ტესტი ✅**
+
+### 4. FallbackTrigger (`app/core/fallback_trigger.py`)
+
+შეცდომების აღმოჩენა:
+
+| Trigger | აღწერა |
+|---------|--------|
+| `SAFETY_BLOCK` | FinishReason.SAFETY |
+| `RECITATION` | FinishReason.RECITATION |
+| `SERVICE_503` | HTTP 503 error |
+| `TIMEOUT` | Request timeout |
+| `EMPTY_RESPONSE` | ცარიელი text |
+
+**18 ტესტი ✅**
+
+### 5. HybridInferenceManager (`app/core/hybrid_manager.py`)
+
+ერთიანი ორქესტრატორი:
+
+```python
+class HybridInferenceManager:
+    def route_request(message, history) -> RoutingResult
+    def record_success(model) -> None
+    def record_failure(model, exception) -> None
+    def get_status() -> Dict
+```
+
+**13 ტესტი ✅**
+
+---
+
+## Engine Integration
+
+### შეცვლილი ფაილები
+
+| ფაილი | ცვლილება |
+|-------|----------|
+| `app/core/engine.py` | HybridInferenceManager import + integration |
+| `app/adapters/gemini_adapter.py` | `model_override` პარამეტრი |
+| `tests/core/test_engine_integration.py` | MockGeminiAdapter fix |
+
+### stream_message ინტეგრაცია
+
+```python
+# Phase 3: Route request using hybrid manager
+if self.hybrid_manager:
+    routing = self.hybrid_manager.route_request(
+        message=message,
+        history=context.history,
+    )
+    selected_model = routing.model
+
+# Phase 4: Create chat with routed model
+chat = await self._create_chat_session(context, model_override=selected_model)
+
+# Success/Failure recording
+self.hybrid_manager.record_success(selected_model)
+self.hybrid_manager.record_failure(selected_model, exception=e)
+```
+
+### SSE done event
+
+```json
+{
+  "event": "done",
+  "data": {
+    "session_id": "...",
+    "model_used": "gemini-3-flash-preview"  // ახალი field
+  }
+}
+```
+
+---
+
+## ტესტირების შედეგები
+
+```
+======================= 294 passed, 4 warnings in 3.14s ========================
+```
+
+| კატეგორია | რაოდენობა |
+|-----------|-----------|
+| CircuitBreaker | 17 |
+| TokenCounter | 16 |
+| ModelRouter | 13 |
+| FallbackTrigger | 18 |
+| HybridManager | 13 |
+| Engine Integration | 9 |
+| სხვა | 208 |
+| **სულ** | **294** |
+
+### Security Scan
+
+```
+semgrep: 0 critical, 0 high, 0 medium, 0 low
+Status: 🟢 APPROVED FOR COMMIT
+```
+
+---
+
+## კონფიგურაცია
+
+```python
+# config.py
+primary_model: str = "gemini-3.0-flash-preview-04-17"
+extended_model: str = "gemini-2.5-pro-preview-06-05"
+fallback_model: str = "gemini-2.5-flash-preview-04-17"
+
+circuit_failure_threshold: int = 5
+circuit_recovery_seconds: float = 60.0
+extended_context_threshold: int = 150_000
+```
+
+---
+
+## როგორ მუშაობს პრაქტიკაში
+
+**სცენარი 1: ნორმალური მოთხოვნა**
+```
+მომხმარებელი: "რომელი პროტეინი ჯობია?"
+         ↓
+HybridManager: context=5000 tokens, Flash Preview healthy
+         ↓
+Gemini 3.0 Flash Preview: პასუხობს ✅
+         ↓
+record_success("gemini-3-flash-preview")
+```
+
+**სცენარი 2: მოდელი ჩაიშალა**
+```
+Gemini 3.0 Flash Preview: 503 Service Unavailable!
+         ↓
+FallbackTrigger: SERVICE_503 detected!
+         ↓
+record_failure("gemini-3-flash-preview")
+         ↓
+CircuitBreaker: failures=5 → OPEN state
+         ↓
+Next request → Gemini 2.5 Pro (fallback)
+```
+
+**სცენარი 3: დიდი კონტექსტი**
+```
+მომხმარებელი: [200k token ისტორია]
+         ↓
+HybridManager: context > 150k → Pro model
+         ↓
+Gemini 2.5 Pro: handles 1M context ✅
+```
+
+---
+
+## შემდეგი ნაბიჯები (Optional)
+
+| Phase | აღწერა | სტატუსი |
+|-------|--------|---------|
+| 1-8 | Core Implementation | ✅ Complete |
+| 9 | Mid-Stream Recovery | ⏳ Optional |
+| 10 | Stress Tests | ⏳ Optional |
+
+### Mid-Stream Recovery (Phase 9)
+
+თუ streaming შუაში გაწყდა:
+- Buffer + Retry approach
+- Frontend receives `retry` event
+- Frontend clears partial text
+- New model restarts from beginning
+
+---
+
+*Last Updated: January 27, 2026 ~18:00*
+
+---
+
+## Phase 9: Mid-Stream SAFETY Fallback (January 27, 2026 ~18:30-18:45)
+
+### პრობლემა
+
+**Gemini 3.0 Flash Preview** ხშირად აბრუნებს `FinishReason.SAFETY` ჯანმრთელობასთან და წონასთან დაკავშირებულ შეკითხვებზე, რაც იწვევს პასუხის მოჭრას სიტყვის შუაში.
+
+**მაგალითი:**
+- **შემავალი:** "მინდა წონის კლება ძალიან სწრაფად, მაგრამ თან მინდა „მას გეინერი" ვიყიდო..."
+- **გამომავალი (მოჭრილი):** "გამარჯობა გიორგი. როგორც შენი პროფილიდან ვხედავ, გაქვს ლაქტობის აუტანლობა და ხარ დამწყები, რაც ძალიან მნიშვნელოვანია პრო"
+
+### მიზანი
+
+SAFETY-ით მოჭრილ პასუხებზე ავტომატურად გადავცვალოთ fallback მოდელზე და დავაბრუნოთ სრული პასუხი.
+
+---
+
+### არქიტექტურული ცვლილებები
+
+#### 1. `app/core/types.py`
+
+```python
+@dataclass
+class RoundOutput:
+    # ... existing fields ...
+    finish_reason: Optional[str] = None  # NEW: To capture SAFETY, STOP, etc.
+
+@dataclass  
+class LoopState:
+    # ... existing fields ...
+    last_finish_reason: Optional[str] = None  # NEW: Tracks last finish reason
+```
+
+#### 2. `app/core/function_loop.py`
+
+**finish_reason capture (L656-658):**
+```python
+if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+    last_finish_reason = str(candidate.finish_reason)
+    logger.info(f"🏁 DEBUG: Chunk #{chunk_count} finish_reason: {last_finish_reason}")
+```
+
+**RoundOutput return (L716):**
+```python
+return RoundOutput(
+    result=result,
+    text=accumulated_text,
+    function_calls=function_calls,
+    thoughts=thoughts,
+    finish_reason=last_finish_reason,  # NEW
+)
+```
+
+**State update (L537-539):**
+```python
+if output.finish_reason:
+    self.state.last_finish_reason = output.finish_reason
+```
+
+#### 3. `app/core/engine.py` (L480-545)
+
+57-ხაზიანი SAFETY detection & fallback logic:
+
+```python
+# DEBUG: Log state for SAFETY analysis
+logger.info(
+    f"🔬 DEBUG SAFETY CHECK: "
+    f"last_finish_reason={state.last_finish_reason}, "
+    f"text_len={len(state.accumulated_text)}"
+)
+
+# SAFETY Fallback: Check if stream was cut due to SAFETY filter
+safety_retry_attempted = False
+if (
+    state.last_finish_reason 
+    and "SAFETY" in state.last_finish_reason.upper()
+    and len(state.accumulated_text.strip()) < 300  # Georgian greetings ~130 chars
+):
+    logger.warning(f"⚠️ SAFETY detected with only {len(state.accumulated_text)} chars...")
+    
+    # Record failure for circuit breaker
+    self.hybrid_manager.record_failure(selected_model, exception=RuntimeError("SAFETY_BLOCK"))
+    
+    # Get fallback model
+    fallback_model = self.hybrid_manager.get_fallback_model(selected_model)
+    if fallback_model and fallback_model != selected_model:
+        # Clear buffer, recreate chat session, re-execute streaming
+        buffer.clear()
+        chat = await self._create_chat_session(context, model_override=fallback_model)
+        loop = FunctionCallingLoop(chat_session=chat, ...)
+        state = await loop.execute_streaming(enhanced_message)
+```
+
+#### 4. `app/core/hybrid_manager.py` (L301-340)
+
+**ახალი მეთოდი `get_fallback_model()`:**
+
+```python
+def get_fallback_model(self, current_model: str) -> Optional[str]:
+    """
+    Get the next fallback model in the hierarchy.
+    
+    Hierarchy:
+    - gemini-3-flash-preview → gemini-2.5-pro
+    - gemini-2.5-pro → gemini-2.5-flash
+    - gemini-2.5-flash → None (no more fallbacks)
+    """
+    model_hierarchy = {
+        self.config.primary_model: self.config.extended_model,
+        self.config.extended_model: self.config.fallback_model,
+        self.config.fallback_model: None,
+    }
+    
+    fallback = model_hierarchy.get(current_model)
+    if fallback:
+        logger.info(f"📥 Fallback for '{current_model}' → '{fallback}'")
+    return fallback
+```
+
+---
+
+### მონაცემთა ნაკადი
+
+```
+User Message
+    ↓
+engine.py::stream_message()
+    ↓
+loop.execute_streaming(message)
+    ↓ (შიდა ციკლი)
+_execute_round_streaming() → RoundOutput(finish_reason="FinishReason.SAFETY")
+    ↓
+_update_state_from_output() → LoopState.last_finish_reason = "FinishReason.SAFETY"
+    ↓
+return LoopState
+    ↓
+engine.py: if "SAFETY" in state.last_finish_reason and text < 300
+    ↓ (YES)
+hybrid_manager.get_fallback_model("gemini-3-flash-preview") → "gemini-2.5-pro"
+    ↓
+buffer.clear() + new chat session + re-execute
+    ↓
+Complete response from gemini-2.5-pro ✅
+```
+
+---
+
+### ლოგების ნიმუში (წარმატებული fallback)
+
+```
+🔬 DEBUG SAFETY CHECK: last_finish_reason=FinishReason.SAFETY, text_len=145, text_stripped_len=142
+⚠️ SAFETY detected with only 145 chars, attempting fallback retry...
+📥 Fallback for 'gemini-3-flash-preview' → 'gemini-2.5-pro'
+🔄 Retrying with fallback model: gemini-2.5-pro
+✅ Fallback complete: 1456 chars, finish_reason=FinishReason.STOP
+```
+
+---
+
+### Root Cause Analysis
+
+**პირველადი პრობლემა:** `get_fallback_model()` მეთოდი არ არსებობდა `HybridInferenceManager`-ში.
+
+**გამოსწორება:** დამატებულია 40-ხაზიანი მეთოდი ნათელი მოდელების იერარქიით:
+1. `gemini-3.0-flash-preview` → `gemini-2.5-pro`
+2. `gemini-2.5-pro` → `gemini-2.5-flash`
+3. `gemini-2.5-flash` → `None`
+
+---
+
+### ტესტირება
+
+| ტესტი | სტატუსი |
+|-------|---------|
+| Unit tests (294) | ✅ Passed |
+| Engine integration (24) | ✅ Passed |
+| Semgrep security scan | ✅ 0 findings |
+| Manual test (health query) | ⏳ Testing |
+
+---
+
+---
+
+## Bug Fix: record_failure() Argument Mismatch (January 27, 2026 ~19:05)
+
+### პრობლემა
+
+SAFETY fallback მექანიზმი სწორად აფიქსირებდა SAFETY-ს, მაგრამ fallback-ის დაწყებისას crash ხდებოდა:
+
+```
+TypeError: HybridInferenceManager.record_failure() got multiple values for argument 'exception'
+```
+
+### Root Cause
+
+`engine.py`-ში `record_failure()` არასწორად იძახებოდა - პირველ პოზიციურ არგუმენტად `selected_model` გადაეცემოდა, მაგრამ მეთოდი მოდელის სახელს არ ღებულობს:
+
+```python
+# ❌ არასწორი (engine.py ხაზები 503, 613, 625, 637)
+self.hybrid_manager.record_failure(selected_model, exception=e)
+
+# ✅ სწორი
+self.hybrid_manager.record_failure(exception=e)
+```
+
+### hybrid_manager.py სიგნატურა
+
+```python
+def record_failure(
+    self,
+    exception: Optional[Exception] = None,
+    response: Optional[Any] = None,
+) -> Tuple[bool, Optional[RoutingDecision]]:
+```
+
+### გამოსწორება
+
+მოხსნილია `selected_model` არგუმენტი 4 ადგილიდან `engine.py`-ში:
+- ხაზი 503 (SAFETY fallback block)
+- ხაზი 613 (EmptyResponseError handler)
+- ხაზი 625 (LoopTimeoutError handler)  
+- ხაზი 637 (General Exception handler)
+
+### ვერიფიკაცია
+
+ტესტი რეალურ SAFETY trigger-ით:
+
+```
+🏁 finish_reason: FinishReason.SAFETY (79 chars)
+🔬 SAFETY detected with only 79 chars, attempting fallback retry...
+📥 Fallback for 'gemini-3-flash-preview' → 'gemini-2.5-pro' (stable)
+🔄 Retrying with fallback model: gemini-2.5-pro
+✅ Fallback complete: 2549 chars, finish_reason=FinishReason.STOP
+```
+
+### შედეგი
+
+| Before Fix | After Fix |
+|:-----------|:----------|
+| SAFETY → TypeError crash | SAFETY → Seamless fallback |
+| მომხმარებელი ხედავს error | მომხმარებელი ხედავს სრულ პასუხს |
+
+---
+
+*Last Updated: January 27, 2026 ~19:08*
+

@@ -168,6 +168,7 @@ class RoundOutput:
     products_found: List[Dict[str, Any]] = field(default_factory=list)
     thoughts: List[str] = field(default_factory=list)  # For logging only, NOT for fallback
     error: Optional[str] = None
+    finish_reason: Optional[str] = None  # Track Gemini finish reason (STOP, SAFETY, etc.)
 
     @property
     def has_text(self) -> bool:
@@ -202,6 +203,9 @@ class LoopState:
 
     # TIP tracking
     native_tip_extracted: bool = False
+    
+    # SAFETY fallback tracking
+    last_finish_reason: Optional[str] = None  # Last round's finish reason (for SAFETY detection)
 
     def add_products(self, products: List[Dict[str, Any]]) -> int:
         """

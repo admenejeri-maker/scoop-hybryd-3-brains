@@ -47,6 +47,7 @@ from .thinking_manager import (
     ThinkingEvent,
     create_thinking_manager,
 )
+from .hybrid_manager import HybridInferenceManager, HybridConfig
 
 from app.adapters.gemini_adapter import GeminiAdapter, GeminiConfig
 from app.adapters.mongo_adapter import MongoAdapter, MongoConfig
@@ -300,6 +301,17 @@ class ConversationEngine:
         # Store tools and system instruction
         self.system_instruction = system_instruction
         self.tools = tools or []
+        
+        # Initialize hybrid inference manager for model routing
+        try:
+            self.hybrid_manager = HybridInferenceManager()
+            logger.info(
+                f"HybridInferenceManager ready: "
+                f"primary={self.hybrid_manager.config.primary_model}"
+            )
+        except Exception as e:
+            logger.warning(f"HybridInferenceManager init failed: {e}")
+            self.hybrid_manager = None
 
         logger.info(
             f"ConversationEngine initialized: model={self.config.model_name}, "
@@ -413,10 +425,27 @@ class ConversationEngine:
             # Phase 2: Load context
             await self._load_context(context)
 
-            # Phase 3: Create chat session
-            chat = await self._create_chat_session(context)
+            # Phase 3: Route request using hybrid manager (if available)
+            selected_model = None
+            if self.hybrid_manager:
+                try:
+                    routing = self.hybrid_manager.route_request(
+                        message=message,
+                        history=context.history,
+                    )
+                    selected_model = routing.model
+                    logger.info(
+                        f"HybridRouter: selected {selected_model} "
+                        f"(reason={routing.reason})"
+                    )
+                except Exception as e:
+                    logger.warning(f"HybridRouter failed: {e}, using default model")
+                    selected_model = None
 
-            # Phase 4: Create tool executor
+            # Phase 4: Create chat session with routed model
+            chat = await self._create_chat_session(context, model_override=selected_model)
+
+            # Phase 5: Create tool executor
             executor = await self._create_tool_executor(context)
 
             # Phase 5: Execute function calling loop with streaming
@@ -447,9 +476,73 @@ class ConversationEngine:
 
             # Execute streaming loop
             state = await loop.execute_streaming(enhanced_message)
+            
+            # DEBUG: Log state for SAFETY analysis
+            logger.info(
+                f"🔬 DEBUG SAFETY CHECK: "
+                f"last_finish_reason={state.last_finish_reason}, "
+                f"text_len={len(state.accumulated_text)}, "
+                f"text_stripped_len={len(state.accumulated_text.strip())}"
+            )
+            
+            # SAFETY Fallback: Check if stream was cut due to SAFETY filter
+            # Only retry if: (1) SAFETY detected, (2) minimal text generated, (3) not already retried
+            safety_retry_attempted = False
+            if (
+                state.last_finish_reason 
+                and "SAFETY" in state.last_finish_reason.upper()
+                and len(state.accumulated_text.strip()) < 300  # Raised from 100 - Georgian greetings are ~130 chars
+            ):
+                logger.warning(
+                    f"⚠️ SAFETY detected with only {len(state.accumulated_text)} chars, "
+                    f"attempting fallback retry..."
+                )
+                
+                # Record failure for circuit breaker
+                if self.hybrid_manager and selected_model:
+                    self.hybrid_manager.record_failure(
+                        exception=RuntimeError("SAFETY_BLOCK")
+                    )
+                
+                # Get fallback model
+                if self.hybrid_manager:
+                    fallback_model = self.hybrid_manager.get_fallback_model(selected_model)
+                    if fallback_model and fallback_model != selected_model:
+                        logger.info(f"🔄 Retrying with fallback model: {fallback_model}")
+                        safety_retry_attempted = True
+                        selected_model = fallback_model
+                        
+                        # Re-create chat session with fallback model
+                        chat = await self._create_chat_session(context, model_override=fallback_model)
+                        
+                        # Re-create loop with new session
+                        loop = FunctionCallingLoop(
+                            chat_session=chat,
+                            tool_executor=executor,
+                            config=LoopConfig(
+                                max_rounds=self.config.max_function_rounds,
+                                timeout_seconds=self.config.gemini_timeout_seconds,
+                                max_unique_queries=self.config.max_unique_queries,
+                                enable_retry=self.config.retry_on_empty,
+                            ),
+                            on_text_chunk=lambda chunk: self._on_text_chunk(chunk, buffer),
+                            on_function_call=on_function_call,
+                        )
+                        
+                        # Clear buffer for fresh start
+                        buffer.clear()
+                        
+                        # Re-execute streaming loop with fallback model
+                        state = await loop.execute_streaming(enhanced_message)
+                        logger.info(
+                            f"✅ Fallback complete: {len(state.accumulated_text)} chars, "
+                            f"finish_reason={state.last_finish_reason}"
+                        )
+                    else:
+                        logger.warning("No fallback model available, returning partial response")
 
             # Check if retry was attempted (texts=0 scenario)
-            if state.retry_attempted:
+            if state.retry_attempted or safety_retry_attempted:
                 retry_event = thinking_manager.get_retry_event(len(state.all_products))
                 yield SSEEvent("thinking", retry_event.to_sse_data())
 
@@ -505,10 +598,18 @@ class ConversationEngine:
                 "session_id": context.session_id,  # CRITICAL: Frontend needs this for session persistence
                 "elapsed_seconds": context.elapsed_seconds(),
                 "thinking_steps": thinking_manager.step_count,
+                "model_used": selected_model or self.config.model_name,
             })
+            
+            # Record success for circuit breaker
+            if self.hybrid_manager and selected_model:
+                self.hybrid_manager.record_success(selected_model)
 
         except EmptyResponseError as e:
             logger.error(f"Empty response in stream: {e}")
+            # Record failure for circuit breaker
+            if self.hybrid_manager and selected_model:
+                self.hybrid_manager.record_failure(exception=e)
             error = get_error_response("empty_response")
             yield SSEEvent("error", {
                 "code": error.error_code,
@@ -518,6 +619,9 @@ class ConversationEngine:
 
         except LoopTimeoutError as e:
             logger.error(f"Timeout in stream: {e}")
+            # Record failure for circuit breaker
+            if self.hybrid_manager and selected_model:
+                self.hybrid_manager.record_failure(exception=e)
             error = get_error_response("timeout")
             yield SSEEvent("error", {
                 "code": error.error_code,
@@ -527,6 +631,9 @@ class ConversationEngine:
 
         except Exception as e:
             logger.error(f"Stream error: {e}", exc_info=True)
+            # Record failure for circuit breaker
+            if self.hybrid_manager and selected_model:
+                self.hybrid_manager.record_failure(exception=e)
             error = get_error_response("internal_error")
             yield SSEEvent("error", {
                 "code": error.error_code,
@@ -723,12 +830,17 @@ class ConversationEngine:
     # CHAT SESSION CREATION
     # =========================================================================
 
-    async def _create_chat_session(self, context: RequestContext) -> Any:
+    async def _create_chat_session(
+        self, 
+        context: RequestContext,
+        model_override: Optional[str] = None,
+    ) -> Any:
         """
         Create Gemini chat session with loaded context.
 
         Args:
             context: RequestContext with history and profile
+            model_override: Optional model name for fallback routing
 
         Returns:
             Gemini AsyncChat session
@@ -744,6 +856,7 @@ class ConversationEngine:
             history=sdk_history,
             tools=self.tools,
             system_instruction=system_instruction,
+            model_override=model_override,
         )
 
         return chat

@@ -71,7 +71,7 @@ RETRY_EXCEPTIONS = (
 @dataclass
 class GeminiConfig:
     """Configuration for GeminiAdapter."""
-    model_name: str = "gemini-2.5-flash"  # Migrated from gemini-3-flash-preview
+    model_name: str = "gemini-2.5-pro"  # Stable GA model
     temperature: float = 1.0  # Gemini 3 recommended default
     top_p: float = 0.95
     top_k: int = 40
@@ -136,6 +136,7 @@ class GeminiAdapter:
         history: Optional[List[Any]] = None,
         tools: Optional[List[Any]] = None,
         system_instruction: Optional[str] = None,
+        model_override: Optional[str] = None,
     ) -> Any:
         """
         Create a new chat session with Manual Function Calling.
@@ -147,10 +148,14 @@ class GeminiAdapter:
             history: Optional conversation history (SDK format)
             tools: Optional list of tool definitions
             system_instruction: Optional system prompt
+            model_override: Optional model name to use instead of config default
 
         Returns:
             AsyncChat session ready for send_message calls
         """
+        # Determine which model to use
+        model_name = model_override or self.config.model_name
+        
         # Build configuration with AFC DISABLED
         chat_config = GenerateContentConfig(
             system_instruction=system_instruction,
@@ -172,7 +177,7 @@ class GeminiAdapter:
         # Create async chat session
         # NOTE: gemini_client.aio.chats.create() is SYNC - returns AsyncChat directly
         chat = self.client.aio.chats.create(
-            model=self.config.model_name,
+            model=model_name,
             history=history if history else None,
             config=chat_config,
         )

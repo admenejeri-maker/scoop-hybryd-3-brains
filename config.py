@@ -33,10 +33,10 @@ class Settings(BaseModel):
     debug: bool = Field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")
 
     # Model Configuration
-    # Question #5: Rate Limits for Gemini 2.5 Flash:
-    # - Free tier: 15 RPM, 1M TPM, 1500 RPD
-    # - Paid tier: 2000 RPM, 4M TPM (standard), scales with billing
-    model_name: str = "gemini-2.5-flash"  # Migrated from gemini-3-flash-preview for stable safety settings
+    # Gemini 2.5 Pro: Stable GA reasoning model
+    # - Price: $1.25/1M input, $10.00/1M output
+    # - Thinking: uses thinking_budget (0-24576, -1 for dynamic)
+    model_name: str = "gemini-2.5-pro"  # Stable GA model with strong reasoning
 
     # Session & Memory
     # Question #1: Memory Persistence - Session TTL
@@ -77,18 +77,18 @@ class Settings(BaseModel):
         default_factory=lambda: int(os.getenv("MAX_FUNCTION_CALLS", "5"))
     )
 
-    # Gemini 2.5 Thinking Configuration (uses thinking_budget, not thinking_level)
-    # HIGH: 16384 tokens = deep reasoning for complex queries
+    # Gemini 2.5 Pro Thinking Configuration
+    # Uses thinking_budget (0-24576), NOT thinking_level
+    # Set to -1 for dynamic thinking (auto-adjust based on complexity)
     thinking_budget: int = Field(
         default_factory=lambda: int(os.getenv("THINKING_BUDGET", "16384"))  # HIGH = Deep reasoning
     )
     include_thoughts: bool = Field(
-        default_factory=lambda: os.getenv("INCLUDE_THOUGHTS", "true").lower() == "true"  # Re-enabled
+        default_factory=lambda: os.getenv("INCLUDE_THOUGHTS", "true").lower() == "true"
     )
-    # Gemini 3 thinking depth: MINIMAL, LOW, MEDIUM, HIGH
-    # MEDIUM = balanced speed/quality (testing)
+    # Legacy: thinking_level for Gemini 3 compatibility
     thinking_level: str = Field(
-        default_factory=lambda: os.getenv("THINKING_LEVEL", "MEDIUM")
+        default_factory=lambda: os.getenv("THINKING_LEVEL", "HIGH")
     )
 
     # Temperature for generation (Gemini 3 recommended: 1.0)
@@ -96,6 +96,36 @@ class Settings(BaseModel):
     # as lower values can cause unexpected behavior in math/reasoning tasks
     temperature: float = Field(
         default_factory=lambda: float(os.getenv("TEMPERATURE", "1.0"))
+    )
+
+    # ==========================================================================
+    # HYBRID INFERENCE ARCHITECTURE (v3.0)
+    # ==========================================================================
+    # Primary: gemini-3-flash-preview (reasoning, thinkingLevel)
+    # Extended: gemini-2.5-pro (1M context, thinkingBudget)
+    # Fallback: gemini-2.5-flash (reliability, thinkingBudget)
+    primary_model: str = Field(
+        default_factory=lambda: os.getenv("PRIMARY_MODEL", "gemini-3-flash-preview")
+    )
+    fallback_model: str = Field(
+        default_factory=lambda: os.getenv("FALLBACK_MODEL", "gemini-2.5-flash")
+    )
+    extended_model: str = Field(
+        default_factory=lambda: os.getenv("EXTENDED_MODEL", "gemini-2.5-pro")
+    )
+
+    # Circuit Breaker: Open after N failures within recovery window
+    circuit_failure_threshold: int = Field(
+        default_factory=lambda: int(os.getenv("CIRCUIT_FAILURE_THRESHOLD", "5"))
+    )
+    circuit_recovery_seconds: float = Field(
+        default_factory=lambda: float(os.getenv("CIRCUIT_RECOVERY_SECONDS", "60.0"))
+    )
+
+    # Extended Context: Route to extended model when history exceeds threshold
+    # Default 150k (75% of gemini-3-flash-preview's 200k limit)
+    extended_context_threshold: int = Field(
+        default_factory=lambda: int(os.getenv("EXTENDED_CONTEXT_THRESHOLD", "150000"))
     )
 
     # Vector Search Configuration
