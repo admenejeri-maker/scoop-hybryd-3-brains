@@ -48,6 +48,7 @@ from .thinking_manager import (
     create_thinking_manager,
 )
 from .hybrid_manager import HybridInferenceManager, HybridConfig
+from .fallback_trigger import FallbackTrigger
 
 from app.adapters.gemini_adapter import GeminiAdapter, GeminiConfig
 from app.adapters.mongo_adapter import MongoAdapter, MongoConfig
@@ -607,7 +608,89 @@ class ConversationEngine:
 
         except EmptyResponseError as e:
             logger.error(f"Empty response in stream: {e}")
-            # Record failure for circuit breaker
+            
+            # Attempt fallback retry (ONE attempt only, matching SAFETY pattern)
+            if self.hybrid_manager and selected_model and not safety_retry_attempted:
+                fallback_trigger = FallbackTrigger()
+                decision = fallback_trigger.analyze_exception(e)
+                
+                if decision.should_fallback:
+                    fallback_model = self.hybrid_manager.get_fallback_model(selected_model)
+                    if fallback_model and fallback_model != selected_model:
+                        logger.info(f"🔄 Fallback retry for empty response: {fallback_model}")
+                        safety_retry_attempted = True  # Prevent infinite retries
+                        
+                        # Record failure before retry
+                        self.hybrid_manager.record_failure(exception=e)
+                        
+                        # Re-create chat session with fallback model
+                        chat = await self._create_chat_session(context, model_override=fallback_model)
+                        
+                        # Re-create loop with new session
+                        loop = FunctionCallingLoop(
+                            chat_session=chat,
+                            tool_executor=executor,
+                            config=LoopConfig(
+                                max_rounds=self.config.max_function_rounds,
+                                timeout_seconds=self.config.gemini_timeout_seconds,
+                                max_unique_queries=self.config.max_unique_queries,
+                                enable_retry=self.config.retry_on_empty,
+                            ),
+                            on_text_chunk=lambda chunk: self._on_text_chunk(chunk, buffer),
+                            on_function_call=on_function_call,
+                        )
+                        
+                        # Clear buffer for fresh start
+                        buffer.clear()
+                        
+                        try:
+                            # Re-execute streaming loop with fallback model
+                            state = await loop.execute_streaming(enhanced_message)
+                            logger.info(
+                                f"✅ Empty response fallback complete: {len(state.accumulated_text)} chars"
+                            )
+                            
+                            # Emit retry thinking event
+                            retry_event = thinking_manager.get_retry_event(len(state.all_products))
+                            yield SSEEvent("thinking", retry_event.to_sse_data())
+                            
+                            # Continue with normal flow - set buffer state
+                            buffer.set_text(state.accumulated_text)
+                            buffer.add_products(state.all_products)
+                            buffer.extract_and_set_tip()
+                            buffer.parse_quick_replies()
+                            
+                            # Proceed to snapshot and response
+                            snapshot = buffer.get_snapshot()
+                            if snapshot.text:
+                                yield SSEEvent("text", {"content": snapshot.text})
+                            if snapshot.products:
+                                formatted_products = self._format_products_markdown(snapshot.products)
+                                yield SSEEvent("products", {"content": formatted_products})
+                            if snapshot.tip:
+                                yield SSEEvent("tip", {"content": snapshot.tip})
+                            if snapshot.quick_replies:
+                                yield SSEEvent("quick_replies", {"replies": snapshot.quick_replies})
+                            
+                            # Save and done
+                            save_attempted = True
+                            await self._save_context(context, chat)
+                            yield SSEEvent("done", {
+                                "success": True,
+                                "session_id": context.session_id,
+                                "elapsed_seconds": context.elapsed_seconds(),
+                                "model_used": fallback_model,
+                                "fallback_used": True,
+                            })
+                            
+                            self.hybrid_manager.record_success(fallback_model)
+                            return  # Success - exit generator
+                            
+                        except Exception as retry_error:
+                            logger.error(f"Fallback retry also failed: {retry_error}")
+                            # Fall through to error response below
+            
+            # No fallback available or fallback failed - return error
             if self.hybrid_manager and selected_model:
                 self.hybrid_manager.record_failure(exception=e)
             error = get_error_response("empty_response")

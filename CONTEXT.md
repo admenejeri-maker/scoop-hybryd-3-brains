@@ -2336,3 +2336,120 @@ def record_failure(
 
 *Last Updated: January 27, 2026 ~19:08*
 
+---
+
+## Development Timeline: January 27-28, 2026 (~23:00-00:30)
+
+### Session: EmptyResponseError Fallback + System Prompt Safety Refinement
+
+**Goal:** Implement fallback retry mechanism for `EmptyResponseError` and refine health/safety guidelines in system prompt.
+
+---
+
+## EmptyResponseError Fallback Implementation
+
+### პრობლემა
+
+`EmptyResponseError` ხშირად ხდებოდა Gemini-ს ცარიელი პასუხების გამო, მაგრამ fallback არ ირთვებოდა - მომხმარებელი პირდაპირ error-ს ხედავდა.
+
+### გადაწყვეტა
+
+SAFETY fallback პატერნის გამოყენებით დაემატა EmptyResponseError-ის fallback:
+
+**`engine.py` L608-700:**
+
+```python
+except EmptyResponseError as e:
+    logger.error(f"Empty response in stream: {e}")
+    
+    # Attempt fallback retry (ONE attempt only, matching SAFETY pattern)
+    if self.hybrid_manager and selected_model and not safety_retry_attempted:
+        fallback_trigger = FallbackTrigger()
+        decision = fallback_trigger.analyze_exception(e)
+        
+        if decision.should_fallback:
+            fallback_model = self.hybrid_manager.get_fallback_model(selected_model)
+            if fallback_model and fallback_model != selected_model:
+                logger.info(f"🔄 Fallback retry for empty response: {fallback_model}")
+                safety_retry_attempted = True
+                
+                # Re-create chat session and loop with fallback model
+                # ... (same pattern as SAFETY fallback)
+```
+
+### ტესტები
+
+**ახალი ფაილი:** `tests/test_empty_response_fallback.py`
+
+| ტესტი | აღწერა | სტატუსი |
+|-------|--------|---------|
+| `test_fallback_trigger_analyzes_empty_response` | FallbackTrigger recognizes EmptyResponseError | ✅ |
+| `test_empty_response_fallback_is_retryable` | Fallback decision is retryable | ✅ |
+| `test_fallback_handles_multiple_errors` | Multiple error type handling | ✅ |
+| `test_empty_response_fallback_prevents_duplicates` | No duplicate fallback attempts | ✅ |
+| `test_empty_response_classified_as_unknown_error` | Correct classification | ✅ |
+
+**შედეგი:** 5/5 tests passed ✅
+
+---
+
+## System Prompt Safety Refinement
+
+### პრობლემა
+
+Health & Safety სექცია ძალიან მკაცრი იყო - ყველა ჯანმრთელობასთან დაკავშირებული შეკითხვა ბლოკავდა, მათ შორის ზოგადი ინფორმაციული კითხვები.
+
+### ცვლილებები (`prompts/system_prompt.py` L11-26)
+
+| ძველი | ახალი |
+|-------|-------|
+| STRICT blocking on health keywords | Context-aware: informational vs active complaints |
+| "ვერ გაძლევ რჩევას" | "გირჩევ შეწყვიტო და ექიმთან კონსულტაცია" |
+| Outright refusal for at-risk groups | Safer alternatives offered |
+| Dosage as "law" | Dosage as "optimal norm" |
+
+**ახალი სტრუქტურა:**
+
+```
+## ჯანსაღი ცხოვრების პრინციპები
+
+### კონტექსტის გააზრება
+- ინფორმაციული კითხვა: "რა არის creatine?" → პასუხი ✅
+- აქტიური ჩივილი: "თავი მტკივა" → რეკომენდაცია შეწყვიტოს + ექიმი
+
+### რისკ ჯგუფები
+- ორსული/მეძუძური → უსაფრთხო ალტერნატივები, არა უარი
+
+### დოზირება
+- ოპტიმალური ნორმა, არა კანონი
+```
+
+---
+
+## Frontend Configuration Fix
+
+### Port Mismatch
+
+`.env.local`-ში პორტი არასწორი იყო ლოკალური ტესტირებისთვის:
+
+| ფაილი | ძველი | ახალი |
+|-------|-------|-------|
+| `frontend/.env.local` | `NEXT_PUBLIC_BACKEND_URL=http://localhost:8000` | `http://localhost:8080` |
+
+**შენიშვნა:** ეს მხოლოდ ლოკალური განვითარებისთვის - production-ში სხვა URL გამოიყენება.
+
+---
+
+## შეჯამება
+
+| კომპონენტი | ცვლილება |
+|------------|----------|
+| `engine.py` | +82 ხაზი EmptyResponseError fallback |
+| `system_prompt.py` | -19/+17 ხაზი (რბილი safety) |
+| `tests/test_empty_response_fallback.py` | ახალი, 5 ტესტი |
+| `frontend/.env.local` | პორტი 8000→8080 (ლოკალი) |
+
+---
+
+*Last Updated: January 28, 2026 ~00:30*
+
