@@ -42,7 +42,7 @@ docstring_parser==0.17.0
 emoji==2.15.0
 exceptiongroup==1.2.2
 face==24.0.0
-fastapi==0.109.0
+fastapi==0.116.1
 fastuuid==0.14.0
 filelock==3.20.2
 filetype==1.2.0
