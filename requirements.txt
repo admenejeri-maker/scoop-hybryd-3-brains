@@ -109,8 +109,6 @@ MarkupSafe==3.0.3
 marshmallow==3.26.2
 mccabe==0.7.0
 mcp==1.23.3
-mcp-code-checker @ git+https://github.com/MarcusJellinghaus/mcp-code-checker.git@3ef6a374b09e6680c120f1b5f8422d713f74dc40
-mcp-config @ git+https://github.com/MarcusJellinghaus/mcp-config.git@5d50065cdfc1dc4648bc120924246a519810aff3
 mdurl==0.1.2
 motor==3.3.2
 mpmath==1.3.0
