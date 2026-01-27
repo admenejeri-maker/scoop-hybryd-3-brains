@@ -190,7 +190,6 @@ spacy==3.8.11
 spacy-legacy==3.0.12
 spacy-loggers==1.0.5
 srsly==2.5.2
-sse-starlette==3.1.2
 sseclient-py==1.9.0
 stanza==1.10.1
 structlog==25.5.0
