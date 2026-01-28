@@ -555,6 +555,10 @@ session_manager: Optional[SessionManager] = None
 context_cache_manager: Optional[ContextCacheManager] = None  # Week 4
 cache_refresh_task: Optional[CacheRefreshTask] = None  # Week 4
 
+# TTL Scheduler for daily_facts cleanup
+from app.core.scheduler import ScoopScheduler
+ttl_scheduler: Optional[ScoopScheduler] = None
+
 
 # =============================================================================
 # FASTAPI APP
@@ -665,10 +669,19 @@ async def lifespan(app: FastAPI):
     # Start cleanup task
     cleanup_task = asyncio.create_task(cleanup_loop())
 
+    # Start TTL scheduler for daily_facts cleanup
+    global ttl_scheduler
+    ttl_scheduler = ScoopScheduler()
+    await ttl_scheduler.start()
+
     yield
 
     # Shutdown
     logger.info("Shutting down...")
+
+    # Stop TTL scheduler
+    if ttl_scheduler:
+        await ttl_scheduler.shutdown()
 
     # Stop cache refresh task
     if cache_refresh_task:

@@ -129,9 +129,10 @@ class Settings(BaseModel):
     )
 
     # Vector Search Configuration
-    # Embedding model for semantic product search (768-dim, matches description_embedding)
+    # Embedding model for semantic search (3072-dim with new SDK)
+    # NOTE: New google.genai SDK uses gemini-embedding-001 (text-embedding-004 deprecated)
     embedding_model: str = Field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-004")
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
     )
 
     # Week 4: Context Caching Settings

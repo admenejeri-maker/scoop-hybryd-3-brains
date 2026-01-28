@@ -33,6 +33,7 @@ class FallbackReason(Enum):
     INTERNAL_ERROR = "500_internal_error"
     RATE_LIMITED = "429_rate_limited"
     EMPTY_RESPONSE = "empty_response"
+    INCOMPLETE_RESPONSE = "incomplete_response"  # Text ends mid-sentence (e.g., ":")
     TIMEOUT = "timeout"
     UNKNOWN_ERROR = "unknown_error"
     CIRCUIT_OPEN = "circuit_open"
@@ -113,6 +114,7 @@ class FallbackTrigger:
             "service_errors": 0,
             "rate_limits": 0,
             "empty_responses": 0,
+            "incomplete_responses": 0,
         }
     
     def analyze_response(
@@ -325,3 +327,70 @@ class FallbackTrigger:
         """Reset all metrics to zero."""
         for key in self._metrics:
             self._metrics[key] = 0
+    
+    def analyze_text_completeness(self, text: str) -> FallbackDecision:
+        """
+        Check if text response appears incomplete (mid-sentence).
+        
+        Detects patterns like:
+        - Text ending with ":" (incomplete list)
+        - Text ending with Georgian conjunctions "და ", "მაგრამ "
+        - Very short responses that look cut off
+        
+        Args:
+            text: The accumulated response text
+            
+        Returns:
+            FallbackDecision recommending retry if incomplete
+        """
+        if not text:
+            return FallbackDecision(
+                should_fallback=False,
+                reason=FallbackReason.NONE,
+                details="Empty text - not checking completeness",
+                retryable=False,
+                severity=0,
+            )
+        
+        stripped = text.strip()
+        
+        # Must have meaningful content (>50 chars) to be considered incomplete
+        # Very short text might be intentional
+        if len(stripped) < 50:
+            return FallbackDecision(
+                should_fallback=False,
+                reason=FallbackReason.NONE,
+                details="Text too short to check completeness",
+                retryable=False,
+                severity=0,
+            )
+        
+        # Check for incomplete patterns
+        incomplete_patterns = [
+            (r':\s*$', "ends with colon (incomplete list)"),
+            (r'ვარიანტებია:\s*$', "ends with 'options are:' (incomplete list)"),
+            (r'შემდეგია:\s*$', "ends with 'following:' (incomplete list)"),
+            (r'და\s*$', "ends with Georgian 'and' conjunction"),
+            (r'მაგრამ\s*$', "ends with Georgian 'but' conjunction"),
+        ]
+        
+        for pattern, description in incomplete_patterns:
+            if re.search(pattern, stripped):
+                self._metrics["incomplete_responses"] += 1
+                logger.warning(f"Incomplete response detected: {description}")
+                return FallbackDecision(
+                    should_fallback=True,
+                    reason=FallbackReason.INCOMPLETE_RESPONSE,
+                    details=f"Response {description}",
+                    retryable=True,  # Can retry with fallback model
+                    severity=2,
+                )
+        
+        # Text appears complete
+        return FallbackDecision(
+            should_fallback=False,
+            reason=FallbackReason.NONE,
+            details="Response appears complete",
+            retryable=False,
+            severity=0,
+        )

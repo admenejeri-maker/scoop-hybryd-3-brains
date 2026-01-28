@@ -2453,3 +2453,267 @@ Health & Safety სექცია ძალიან მკაცრი იყ�
 
 *Last Updated: January 28, 2026 ~00:30*
 
+---
+
+## Release: v2.1.0 "The Memory Update" (January 28, 2026)
+
+### Memory System Upgrade
+
+4-ფაზიანი მეხსიერების სისტემის იმპლემენტაცია, რომელიც AI-ს აძლევს მომხმარებლის შესახებ გრძელვადიანი ფაქტების დამახსოვრების შესაძლებლობას.
+
+### არქიტექტურა
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    MEMORY SYSTEM v2.1.0                     │
+└─────────────────────────────────────────────────────────────┘
+
+Phase 1: Tiered Memory Storage
+├── curated_facts (importance ≥ 0.8) → Permanent
+└── daily_facts (importance < 0.8) → 60-day TTL
+
+Phase 2: Hybrid Search
+├── Vector Search (semantic similarity)
+└── BM25-lite (keyword matching)
+└── Score: 0.7×Vector + 0.3×Keyword
+
+Phase 3: Memory Flush
+└── Triggers when history > 30 messages
+└── Extracts facts before pruning old messages
+
+Phase 4: Context Injection
+└── User facts → System Prompt → Gemini
+```
+
+### ფაილები
+
+| ფაილი | ცვლილება |
+|-------|----------|
+| `app/memory/fact_extractor.py` | ახალი - Gemini 2.0 Flash ფაქტების ამოწურება |
+| `app/memory/mongo_store.py` | +150 ხაზი - Tiered storage, _flush_memories |
+| `app/core/engine.py` | +30 ხაზი - Context injection |
+| `scripts/verify_mongo_state.py` | ახალი - MongoDB verification |
+
+### მნიშვნელოვანი შენიშვნა
+
+**FactExtractor მხოლოდ მაშინ ამოიწურებს ფაქტებს, როცა:**
+- სესიაში > 30 მესიჯია (15 exchange)
+- `prune_history()` გამოიძახება
+
+**თუ სესია დაიხურა 30 მესიჯამდე → ფაქტები არ შეინახება!**
+
+---
+
+## Release: v2.1.1 "The Completeness Patch" (January 28, 2026)
+
+### Incomplete Response Detection
+
+პრობლემა: Gemini 2.0 Flash Preview ზოგჯერ წყვეტს პასუხს `FinishReason.STOP`-ით შუა წინადადებაში.
+
+### იმპლემენტაცია
+
+```python
+# fallback_trigger.py
+def analyze_text_completeness(self, text: str) -> FallbackDecision:
+    patterns = [
+        (r':$', "ends with colon"),           # "ვარიანტებია:"
+        (r'\bდა$', "ends with და"),           # "პროტეინი და"
+        (r'\bმაგრამ$', "ends with მაგრამ"),   # "კარგია, მაგრამ"
+    ]
+    # Returns should_fallback=True if incomplete
+```
+
+```python
+# engine.py (lines 542-605)
+if "STOP" in str(state.last_finish_reason).upper():
+    completeness_decision = trigger.analyze_text_completeness(state.accumulated_text)
+    if completeness_decision.should_fallback:
+        # Retry with fallback model
+        fallback_model = self.hybrid_manager.get_fallback_model(selected_model)
+```
+
+### ტესტირება
+
+| ტესტი | შედეგი |
+|-------|--------|
+| Unit tests (fallback_trigger.py) | 18/18 ✅ |
+| Integration tests (engine) | 24/24 ✅ |
+| Empty response fallback | 5/5 ✅ |
+| Model router | 13/13 ✅ |
+
+---
+
+## Release: v2.1.3 Embedding SDK Migration (January 28, 2026)
+
+### პრობლემა
+
+```
+module 'google.genai' has no attribute 'embed_content'
+Session-end fact: error - Invalid embedding dim: 3072, expected 768
+```
+
+### მიზეზი
+
+1. **SDK მიგრაცია**: `google.generativeai` → `google.genai` (v1.x)
+2. **API ცვლილება**: `genai.embed_content()` → `client.models.embed_content()`
+3. **მოდელი**: `text-embedding-004` (768-dim) → `gemini-embedding-001` (3072-dim)
+
+### Fix
+
+| ფაილი | ხაზი | ცვლილება |
+|-------|------|----------|
+| `gemini_adapter.py` | 607 | `self.client.models.embed_content()` |
+| `user_tools.py` | 304, 459 | `_get_embedding()` helper |
+| `engine.py` | 1406 | `in (768, 3072)` |
+| `mongo_store.py` | 1123 | `not in (768, 3072)` |
+
+### ვერიფიკაცია
+
+```
+✅ Extracted 2 facts from 10 messages
+✅ Session-end fact: added - ალერგია არაქისზე...
+✅ Session-end fact: added - ლაქტოზის აუტანლობა...
+```
+
+MongoDB:
+```json
+{
+  "user_id": "widget_qmp7b6634va",
+  "curated_facts": [
+    {"fact": "ალერგია არაქისზე", "embedding": [3072 dims], "importance_score": 0.9},
+    {"fact": "ლაქტოზის აუტანლობა", "embedding": [3072 dims], "importance_score": 0.9}
+  ]
+}
+```
+
+---
+
+## Release: v2.2 Memory Compaction System (January 28, 2026)
+
+### ახალი Features
+
+| Feature | აღწერა |
+|---------|--------|
+| **$slice Limit** | MongoDB array overflow prevention: `-100` curated, `-200` daily facts |
+| **ContextCompactor** | 572-line module for context window management |
+| **Pre-flush Safety** | Facts extracted & saved BEFORE summarization |
+| **Engine Integration** | Phase 2.5 - compaction check between `_load_context()` and `_create_chat_session()` |
+
+### არქიტექტურა
+
+```
+User Message → _load_context() 
+     ↓
+Phase 2.5: Token Check (≥75% of 200k?)
+     ↓ YES
+ContextCompactor.compact()
+  1. Pre-flush facts → MongoDB
+  2. Summarize old messages
+  3. [Summary] + recent_messages
+     ↓
+_create_chat_session() (with compacted history)
+```
+
+### Key Components
+
+| ფაილი | ცვლილება |
+|-------|----------|
+| `context_compactor.py` | ახალი 572-line class with lazy loading |
+| `mongo_store.py:1166-1183` | `$slice` operator for array limits |
+| `engine.py:441-460` | Phase 2.5 compaction integration |
+| `fact_extractor.py` | Reused for pre-flush extraction |
+
+### Lazy Loading Pattern (Circular Import Prevention)
+
+```python
+@property
+def token_counter(self):
+    if self._token_counter is None:
+        from app.core.token_counter import TokenCounter
+        self._token_counter = TokenCounter()
+    return self._token_counter
+```
+
+### ვერიფიკაცია
+
+```bash
+from app.memory.context_compactor import ContextCompactor
+✅ Import test passed!
+```
+
+| Test | Result |
+|------|--------|
+| Circular imports | ✅ None (lazy loading) |
+| Pre-flush safety | ✅ Facts saved first |
+| Error handling | ✅ Graceful fallback |
+| $slice syntax | ✅ Correct MongoDB pattern |
+
+---
+
+*Last Updated: January 28, 2026 ~22:40*
+
+
+---
+
+## Memory v2.2 Manual Testing Results (January 28, 2026 ~23:30)
+
+### ✅ All 5 Tests Passed
+
+| Test | Description | Result |
+|------|-------------|--------|
+| **Test 1** | Fact Extraction | ✅ 9 facts extracted |
+| **Test 2** | $slice Limit | ✅ Ready (curated:-100, daily:-200) |
+| **Test 3** | Compaction Trigger | ✅ 221k tokens → triggers at 150k |
+| **Test 4** | Health Priority | ✅ "დიაბეტი" saved with score 0.9 |
+| **Test 5** | Duplicate Prevention | ✅ Cosine 0.90 threshold works |
+
+### MongoDB Verification
+
+```json
+// Final state after stress testing
+{
+  "user_id": "widget_qmp7b6634va",
+  "curated_facts": 12,  // Health/allergies/goals (permanent)
+  "daily_facts": 3      // Budget/work (60-day TTL)
+}
+```
+
+### Smart Tiering Results
+
+| Score | Category | Examples |
+|-------|----------|----------|
+| **1.0** | Critical Health | ალერგია ლაქტოზაზე, შაქარზე |
+| **0.9** | Health/Allergies | დიაბეტი, ვეგანი, არაქისი |
+| **0.8** | Goals/Bio | კუნთოვანი მასა, 85 კგ წონა |
+| **0.7** | Work | IT-ში მუშაობს |
+| **0.5-0.6** | Preferences | ბიუჯეტი 80₾ |
+
+---
+
+## Feature: Name Extraction (January 28, 2026 ~23:10)
+
+### ცვლილება
+
+`fact_extractor.py` - prompt-ში დაემატა პირადი ინფორმაციის ამოღება:
+
+```diff
+- პრეფერენციები (მაგ: "ვეგანი", "ბიუჯეტი 100₾-მდე")
++ - პრეფერენციები (მაგ: "ვეგანი", "ბიუჯეტი 100₾-მდე")
++ - პირადი ინფორმაცია (მაგ: "სახელი გიორგი", "სქესი")
+```
+
+### ახალი Extraction Categories
+
+| Category | Examples |
+|----------|----------|
+| health | დიაბეტი, ორსული |
+| allergy | ლაქტოზა, არაქისი, შაქარი |
+| preference | ვეგანი, ბიუჯეტი |
+| goal | კუნთის მასის ზრდა |
+| physical | 80კგ წონა, 180სმ სიმაღლე |
+| **personal** ✨ | სახელი გიორგი, სქესი |
+
+---
+
+*Last Updated: January 28, 2026 ~23:35*
+

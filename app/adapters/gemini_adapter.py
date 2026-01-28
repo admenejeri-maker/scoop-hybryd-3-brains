@@ -588,7 +588,7 @@ class GeminiAdapter:
     async def embed_content(
         self,
         text: str,
-        model: str = "text-embedding-004"
+        model: Optional[str] = None
     ) -> List[float]:
         """
         Generate embedding for text content.
@@ -597,18 +597,22 @@ class GeminiAdapter:
 
         Args:
             text: Text to embed
-            model: Embedding model name
+            model: Embedding model name (defaults to settings.embedding_model)
 
         Returns:
             List of embedding values
         """
+        from config import settings
+        if model is None:
+            model = settings.embedding_model
+            
         try:
             result = await asyncio.to_thread(
-                genai.embed_content,
+                self.client.models.embed_content,
                 model=model,
-                content=text
+                contents=text
             )
-            return result.get("embedding", [])
+            return result.embeddings[0].values
         except Exception as e:
             logger.error(f"Embedding error: {e}")
             return []

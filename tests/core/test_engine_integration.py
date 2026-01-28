@@ -13,6 +13,12 @@ These tests verify:
 6. Feature flag routing
 """
 
+import sys
+import os
+
+# Add backend root to path for app imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch

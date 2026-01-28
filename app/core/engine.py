@@ -52,6 +52,7 @@ from .fallback_trigger import FallbackTrigger
 
 from app.adapters.gemini_adapter import GeminiAdapter, GeminiConfig
 from app.adapters.mongo_adapter import MongoAdapter, MongoConfig
+from app.memory.context_compactor import ContextCompactor, create_context_compactor
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,17 @@ class ConversationEngine:
             logger.warning(f"HybridInferenceManager init failed: {e}")
             self.hybrid_manager = None
 
+        # Memory v2.2: Initialize context compactor for 75% threshold compaction
+        try:
+            self.context_compactor = create_context_compactor(
+                threshold=0.75,  # Trigger at 75% of max context
+                max_context_tokens=200_000  # Gemini Flash context window
+            )
+            logger.info("ContextCompactor initialized: threshold=75%, max=200k tokens")
+        except Exception as e:
+            logger.warning(f"ContextCompactor init failed: {e}")
+            self.context_compactor = None
+
         logger.info(
             f"ConversationEngine initialized: model={self.config.model_name}, "
             f"max_rounds={self.config.max_function_rounds}"
@@ -425,6 +437,28 @@ class ConversationEngine:
 
             # Phase 2: Load context
             await self._load_context(context)
+
+            # Phase 2.5: Memory v2.2 - Check for context compaction
+            if self.context_compactor and context.history:
+                try:
+                    if await self.context_compactor.should_compact(context.history):
+                        logger.info(
+                            f"Context compaction triggered for user={context.user_id}, "
+                            f"session={context.session_id}"
+                        )
+                        context.history, compaction_result = await self.context_compactor.compact(
+                            user_id=context.user_id,
+                            history=context.history,
+                            session_id=context.session_id
+                        )
+                        if compaction_result.compacted:
+                            logger.info(
+                                f"Compaction complete: {compaction_result.original_message_count} → "
+                                f"{compaction_result.new_message_count} messages, "
+                                f"{compaction_result.facts_extracted} facts saved"
+                            )
+                except Exception as e:
+                    logger.warning(f"Compaction failed (continuing with original history): {e}")
 
             # Phase 3: Route request using hybrid manager (if available)
             selected_model = None
@@ -542,8 +576,71 @@ class ConversationEngine:
                     else:
                         logger.warning("No fallback model available, returning partial response")
 
+            # INCOMPLETE Response Fallback: Check if model stopped mid-sentence
+            # triggers when: (1) finish_reason is STOP, (2) text ends with incomplete pattern
+            # (3) not already retried via SAFETY fallback
+            incomplete_retry_attempted = False
+            if (
+                not safety_retry_attempted
+                and state.last_finish_reason
+                and "STOP" in str(state.last_finish_reason).upper()
+            ):
+                # Use FallbackTrigger to analyze text completeness
+                from .fallback_trigger import FallbackTrigger
+                trigger = FallbackTrigger()
+                completeness_decision = trigger.analyze_text_completeness(state.accumulated_text)
+                
+                if completeness_decision.should_fallback:
+                    logger.warning(
+                        f"⚠️ INCOMPLETE detected: {completeness_decision.details}, "
+                        f"attempting fallback retry..."
+                    )
+                    
+                    # Record failure for circuit breaker
+                    if self.hybrid_manager and selected_model:
+                        self.hybrid_manager.record_failure(
+                            exception=RuntimeError("INCOMPLETE_RESPONSE")
+                        )
+                    
+                    # Get fallback model
+                    if self.hybrid_manager:
+                        fallback_model = self.hybrid_manager.get_fallback_model(selected_model)
+                        if fallback_model and fallback_model != selected_model:
+                            logger.info(f"🔄 Retrying with fallback model: {fallback_model}")
+                            incomplete_retry_attempted = True
+                            selected_model = fallback_model
+                            
+                            # Re-create chat session with fallback model
+                            chat = await self._create_chat_session(context, model_override=fallback_model)
+                            
+                            # Re-create loop with new session
+                            loop = FunctionCallingLoop(
+                                chat_session=chat,
+                                tool_executor=executor,
+                                config=LoopConfig(
+                                    max_rounds=self.config.max_function_rounds,
+                                    timeout_seconds=self.config.gemini_timeout_seconds,
+                                    max_unique_queries=self.config.max_unique_queries,
+                                    enable_retry=self.config.retry_on_empty,
+                                ),
+                                on_text_chunk=lambda chunk: self._on_text_chunk(chunk, buffer),
+                                on_function_call=on_function_call,
+                            )
+                            
+                            # Clear buffer for fresh start
+                            buffer.clear()
+                            
+                            # Re-execute streaming loop with fallback model
+                            state = await loop.execute_streaming(enhanced_message)
+                            logger.info(
+                                f"✅ Fallback complete: {len(state.accumulated_text)} chars, "
+                                f"finish_reason={state.last_finish_reason}"
+                            )
+                        else:
+                            logger.warning("No fallback model available, returning incomplete response")
+
             # Check if retry was attempted (texts=0 scenario)
-            if state.retry_attempted or safety_retry_attempted:
+            if state.retry_attempted or safety_retry_attempted or incomplete_retry_attempted:
                 retry_event = thinking_manager.get_retry_event(len(state.all_products))
                 yield SSEEvent("thinking", retry_event.to_sse_data())
 
@@ -763,6 +860,18 @@ class ConversationEngine:
         # Step 1: Load context
         await self._load_context(context)
 
+        # Step 1.5: Memory v2.2 - Check for context compaction
+        if self.context_compactor and context.history:
+            try:
+                if await self.context_compactor.should_compact(context.history):
+                    context.history, _ = await self.context_compactor.compact(
+                        user_id=context.user_id,
+                        history=context.history,
+                        session_id=context.session_id
+                    )
+            except Exception as e:
+                logger.warning(f"Compaction failed: {e}")
+
         # Step 2: Create chat session
         chat = await self._create_chat_session(context)
 
@@ -902,6 +1011,12 @@ class ConversationEngine:
                 messages=2,  # User message + assistant response
             )
 
+            # FIX #2: Extract facts at session end (regardless of message count)
+            # This ensures facts are captured even from short sessions
+            if history:
+                bson_history = self.gemini.sdk_history_to_bson(history) if hasattr(self.gemini, 'sdk_history_to_bson') else history
+                await self._extract_facts_on_session_end(context, bson_history)
+
         except Exception as e:
             logger.error(
                 f"💾 _save_context EXCEPTION: session={context.session_id}, error={e}",
@@ -946,7 +1061,10 @@ class ConversationEngine:
 
     def _build_system_instruction(self, context: RequestContext) -> str:
         """
-        Build system instruction with user profile context.
+        Build system instruction with user profile context and memory facts.
+
+        PHASE 4: Injects extracted user facts from memory system into
+        the {{USER_FACTS}} placeholder in the system prompt.
 
         Args:
             context: RequestContext with user profile
@@ -956,6 +1074,11 @@ class ConversationEngine:
         """
         base_instruction = self.system_instruction or ""
 
+        # PHASE 4: Inject user facts from memory into {{USER_FACTS}} placeholder
+        user_facts_text = self._format_user_facts(context)
+        if "{{USER_FACTS}}" in base_instruction:
+            base_instruction = base_instruction.replace("{{USER_FACTS}}", user_facts_text)
+
         # Add user profile context if available
         if context.user_profile:
             profile_context = self._format_profile_context(context.user_profile)
@@ -963,6 +1086,55 @@ class ConversationEngine:
                 return f"{base_instruction}\n\n{profile_context}"
 
         return base_instruction
+
+    def _format_user_facts(self, context: RequestContext) -> str:
+        """
+        Format user facts from memory for system prompt injection.
+
+        PHASE 4: Retrieves relevant facts from the memory system
+        and formats them for the AI to use as context.
+
+        Args:
+            context: RequestContext with user_id
+
+        Returns:
+            Formatted facts string for system prompt injection
+        """
+        try:
+            # Get user facts from profile (synchronous access)
+            facts = context.user_profile.get("user_facts", [])
+            curated = context.user_profile.get("curated_facts", [])
+            daily = context.user_profile.get("daily_facts", [])
+            
+            # Combine all fact sources, prioritizing curated
+            all_facts = []
+            
+            # Add curated facts first (most important)
+            for f in curated[:5]:
+                fact_text = f.get("fact", "") if isinstance(f, dict) else str(f)
+                if fact_text:
+                    all_facts.append(f"• {fact_text}")
+            
+            # Add daily facts
+            for f in daily[:3]:
+                fact_text = f.get("fact", "") if isinstance(f, dict) else str(f)
+                if fact_text and fact_text not in [x.replace("• ", "") for x in all_facts]:
+                    all_facts.append(f"• {fact_text}")
+            
+            # Add legacy user_facts
+            for f in facts[:3]:
+                fact_text = f.get("fact", "") if isinstance(f, dict) else str(f)
+                if fact_text and fact_text not in [x.replace("• ", "") for x in all_facts]:
+                    all_facts.append(f"• {fact_text}")
+            
+            if all_facts:
+                return "\n".join(all_facts[:8])  # Limit to 8 facts
+            else:
+                return "ჯერ არ არის შენახული ინფორმაცია ამ მომხმარებლის შესახებ."
+                
+        except Exception as e:
+            logger.warning(f"Failed to format user facts: {e}")
+            return "ფაქტების ჩატვირთვა ვერ მოხერხდა."
 
     def _format_profile_context(self, profile: Dict[str, Any]) -> str:
         """
@@ -1181,6 +1353,112 @@ class ConversationEngine:
             )
             return context.message
 
+
+    # =========================================================================
+    # FIX #2: SESSION END EXTRACTION
+    # =========================================================================
+
+    async def _extract_facts_on_session_end(
+        self,
+        context: 'RequestContext',
+        history: List[Dict[str, Any]]
+    ) -> None:
+        """
+        FIX #2: Extract facts at session end, regardless of message count.
+        
+        This ensures facts are captured even from short sessions (< 30 messages)
+        that would never trigger the pruning-based extraction.
+        
+        Args:
+            context: RequestContext with user_id
+            history: Current conversation history
+        """
+        MIN_MESSAGES_FOR_EXTRACTION = 3
+        
+        if len(history) < MIN_MESSAGES_FOR_EXTRACTION:
+            logger.debug(f"Session too short for extraction: {len(history)} messages")
+            return
+        
+        try:
+            from app.memory.fact_extractor import FactExtractor
+            from app.adapters.gemini_adapter import create_gemini_adapter
+            from app.memory.mongo_store import UserStore
+            
+            # Only extract from recent messages to avoid duplicates
+            recent_messages = history[-10:] if len(history) > 10 else history
+            
+            extractor = FactExtractor()
+            facts = await extractor.extract_facts(recent_messages)
+            
+            if not facts:
+                logger.debug("No facts extracted from session")
+                return
+            
+            # Create embedding adapter with retry
+            adapter = create_gemini_adapter()
+            user_store = UserStore()
+            
+            for fact_data in facts:
+                fact_text = fact_data.get("fact", "")
+                importance = fact_data.get("importance", 0.5)
+                category = fact_data.get("category", "preference")
+                
+                if len(fact_text) < 10:
+                    continue
+                
+                # Generate embedding with retry
+                embedding = await self._get_embedding_with_retry(adapter, fact_text)
+                if not embedding:
+                    continue
+                
+                # Save fact with correct user_id (FIX #3 ensures this works properly)
+                result = await user_store.add_user_fact(
+                    user_id=context.user_id,
+                    fact=fact_text,
+                    embedding=embedding,
+                    importance_score=importance,
+                    source="session_end",
+                    is_sensitive=(category == "health")
+                )
+                
+                logger.info(f"Session-end fact: {result['status']} - {fact_text[:50]}...")
+                
+        except Exception as e:
+            logger.error(f"Session-end extraction failed: {e}", exc_info=True)
+            # Don't fail the request if extraction fails
+
+    async def _get_embedding_with_retry(
+        self,
+        adapter: Any,
+        text: str,
+        max_retries: int = 3
+    ) -> Optional[List[float]]:
+        """
+        Generate embedding with retry logic.
+        
+        Args:
+            adapter: GeminiAdapter instance
+            text: Text to embed
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            Embedding vector (768-dim or 3072-dim) or None on failure
+        """
+        import asyncio
+        
+        for attempt in range(max_retries):
+            try:
+                embedding = await adapter.embed_content(text)
+                # Accept both 768-dim (old model) and 3072-dim (new gemini-embedding-001)
+                if embedding and len(embedding) in (768, 3072):
+                    return embedding
+            except Exception as e:
+                logger.warning(f"Embedding attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+        
+        logger.error(f"Failed to generate embedding after {max_retries} attempts")
+        return None
 
     # =========================================================================
     # STREAMING CALLBACKS

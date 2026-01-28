@@ -291,22 +291,21 @@ def vector_search_products(
         return _fallback_to_regex_search(query, max_price)
     
     try:
-        # Import Gemini for embedding
-        import google.generativeai as genai
+        # Import new Gemini SDK for embedding
+        from google import genai
         from config import settings
         
-        # Configure Gemini
-        genai.configure(api_key=settings.gemini_api_key)
+        # Create client
+        client = genai.Client(api_key=settings.gemini_api_key)
         
         logger.info(f"🧠 Vector search: Embedding query '{query}'")
         
         # Generate embedding for query (768-dim)
-        embedding_result = genai.embed_content(
-            model=f"models/{settings.embedding_model}",
-            content=query,
-            task_type="retrieval_query"
+        embedding_result = client.models.embed_content(
+            model=settings.embedding_model,
+            contents=query
         )
-        query_vector = embedding_result['embedding']
+        query_vector = embedding_result.embeddings[0].values
         
         logger.info(f"🧠 Vector search: Got {len(query_vector)}-dim embedding")
         
@@ -450,18 +449,17 @@ def search_products(
         # === NEW: Try Vector Search First (semantic) ===
         # Vector search provides better semantic matching for natural language queries
         try:
-            import google.generativeai as genai
+            from google import genai
             from config import settings
             
-            genai.configure(api_key=settings.gemini_api_key)
+            client = genai.Client(api_key=settings.gemini_api_key)
             
             # Generate query embedding
-            embedding_result = genai.embed_content(
-                model=f"models/{settings.embedding_model}",
-                content=query,
-                task_type="retrieval_query"
+            embedding_result = client.models.embed_content(
+                model=settings.embedding_model,
+                contents=query
             )
-            query_vector = embedding_result['embedding']
+            query_vector = embedding_result.embeddings[0].values
             
             # Build vector search pipeline
             pipeline = [

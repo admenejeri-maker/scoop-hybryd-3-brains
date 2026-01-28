@@ -4,6 +4,174 @@ All notable changes to the memory system will be documented here.
 
 ---
 
+## [v2.1.3] - 2026-01-28 - Embedding SDK Migration
+
+### Fixed
+
+#### 🔄 Embedding API Migration (google.genai v1.x)
+- **Issue**: `genai.embed_content` deprecated in new SDK
+- **Error**: `module 'google.genai' has no attribute 'embed_content'`
+- **Fix**: Migrated to `client.models.embed_content()` pattern
+
+#### 📍 Call Sites Updated
+| File | Line | Change |
+|------|------|--------|
+| `gemini_adapter.py` | 607 | `self.client.models.embed_content()` |
+| `user_tools.py` | 304, 459 | New `_get_embedding()` helper |
+
+#### 📐 Dimension Validation
+- **Issue**: Hardcoded 768-dim checks rejected 3072-dim from new model
+- **Model**: `gemini-embedding-001` → 3072 dimensions
+- **Fix**: Updated validation to accept both `768` and `3072`
+
+| File | Line | Before | After |
+|------|------|--------|-------|
+| `engine.py` | 1406 | `== 768` | `in (768, 3072)` |
+| `mongo_store.py` | 1123 | `!= 768` | `not in (768, 3072)` |
+
+### Changed
+
+#### Embedding Model
+- **Config**: `config.py` → `models/gemini-embedding-001`
+- **Dimension**: 768 → 3072 (higher quality vectors)
+
+### Verified
+- Facts saved to MongoDB ✓
+- 3072-dim embeddings stored ✓
+- Semantic deduplication working ✓
+
+---
+
+## [v2.1.2] - 2026-01-28 - Resilience & Scheduler Update
+
+### Added
+
+#### 🕐 TTL Cleanup Scheduler (Phase 3)
+- **New Module**: `app/core/scheduler.py`
+  - `ScoopScheduler` class using APScheduler
+  - Daily cleanup job at 04:00 UTC
+  - Removes expired `daily_facts` from user profiles
+- **Dependency**: `APScheduler==3.10.4`
+- **Integration**: FastAPI lifespan startup/shutdown hooks
+
+#### 🔄 FactExtractor Retry Logic (Phase 2)
+- 3-attempt retry with exponential backoff (1s base × 2^attempt)
+- Handles transient errors: 429, 503, 500, ResourceExhausted
+- Graceful fallback to empty list on persistent failure
+
+#### 🧹 JSON Parsing Robustness (Phase 2)
+- Multi-stage parsing: markdown → direct → regex fallback
+- Handles trailing commas in JSON arrays
+- Extracts valid JSON from mixed text responses
+
+### Changed
+
+#### Embedding Retry Loop
+- 3 attempts per fact embedding
+- **Breaking**: Now skips facts instead of zero-vector fallback
+- Zero-vectors made facts unretrievable via cosine similarity
+
+#### Eager Extraction Threshold
+- Changed: 30 messages → 10 messages
+- Captures facts sooner, prevents loss in short sessions
+
+### Fixed
+
+#### User ID Data Corruption
+- **Issue**: All facts stored under `"current_user"` instead of actual user_id
+- **Location**: `mongo_store.py:_flush_memories()`
+- **Fix**: Pass `user_id` explicitly through call chain
+
+#### Session End Fact Extraction
+- **Issue**: Facts only extracted during pruning (30+ messages)
+- **Fix**: Added `_extract_facts_on_session_end()` hook in engine.py
+- **Impact**: Every session now captures user facts
+
+### Testing
+- 7 new scheduler tests ✓
+- 7 new resilience tests ✓
+- All 51 tests passing ✓
+
+---
+
+## [v2.1.1] - 2026-01-28 - Incomplete Response Hotfix
+
+### Fixed
+
+#### 🔄 INCOMPLETE_RESPONSE Detection
+- **Issue**: Model (`gemini-3-flash-preview`) sometimes stops with `FinishReason.STOP` mid-sentence
+- **Symptom**: Responses ending in `:` without completing the list (e.g., "საუკეთესო ვარიანტებია:")
+- **Solution**: Added `analyze_text_completeness()` detection in `FallbackTrigger`
+
+#### 🛡️ Automatic Fallback to Stronger Model
+- **Trigger**: Response ends with `:` and length > 50 characters
+- **Action**: Automatically retry with Tier 2/3 fallback model (gemini-2.5-pro)
+- **Location**: `engine.py` - INCOMPLETE check added after existing SAFETY fallback
+
+### Technical Details
+
+**New Files/Methods**:
+- `FallbackReason.INCOMPLETE_RESPONSE` enum value
+- `FallbackTrigger.analyze_text_completeness()` method
+- 5 detection patterns: `:`, `ვარიანტებია:`, `შემდეგია:`, `და`, `მაგრამ`
+
+**Metrics**:
+- New counter: `incomplete_responses` in `FallbackTrigger._metrics`
+
+### Testing
+- All 60 existing tests passing ✓
+- Manual verification of pattern detection ✓
+- Security review: No ReDoS risk in regex patterns ✓
+
+---
+
+## [v2.1.0] - 2026-01-28 - The Memory Update
+
+### Added
+
+#### 🧠 AI-Driven Fact Extraction
+- **New Module**: `app/memory/fact_extractor.py`
+  - `FactExtractor` class using Gemini 2.0 Flash for semantic analysis
+  - Georgian-aware prompt for structured extraction: `{fact, importance, category}`
+  - Categories: `preference`, `health`, `allergy`, `goal`, `behavior`
+
+#### 🗂️ Tiered Memory Storage
+- **Curated Facts** (importance ≥ 0.8): Permanent storage for health/allergy data
+- **Daily Facts** (importance < 0.8): 60-day TTL for preferences
+- **Schema Update**: `user_profiles` now includes `curated_facts[]` and `daily_facts[]`
+
+#### 🔍 Hybrid Search (Vector + BM25-lite)
+- Scoring formula: `0.7 × Vector + 0.3 × Keyword`
+- Improves exact brand name matching while preserving semantic search
+- Applied to both product search and user fact retrieval
+
+#### 💉 Context Injection
+- `{{USER_FACTS}}` placeholder in system prompt
+- `engine._format_user_facts()` prioritizes: curated → daily → legacy
+- Facts injected per-request for personalized responses
+
+### Changed
+
+#### Memory Flush Hook
+- `ConversationStore._flush_memories()` now uses `FactExtractor` instead of `FACT:` heuristic
+- Automatic embedding generation for extracted facts
+- Health/allergy categories auto-boosted to curated tier
+
+### Testing
+
+#### Full Regression Suite — 318 Tests Passing ✓
+- Core Engine: 40 integration tests
+- Function Loop: 42 tests
+- Response Buffer: 41 tests
+- Thinking Manager: 28 tests
+- Search-First: 16 tests
+- Bug Fixes: 10 tests
+- Tiered Memory: 19 tests (extraction, routing, hybrid search)
+- Token Counter: 15 tests
+- All E2E pipelines verified
+
+---
+
 ## [Week 1] - 2026-01-13
 
 ### Fixed

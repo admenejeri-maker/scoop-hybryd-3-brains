@@ -261,6 +261,187 @@ if (last_finish_reason == FinishReason.SAFETY and
 
 ---
 
+## Tiered Memory & Fact Extraction System
+
+### Overview
+
+The Memory System provides **persistent user context** across sessions through AI-driven fact extraction and hybrid search retrieval. Facts learned in one session are automatically available in future sessions.
+
+### 3-Tier Memory Storage
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    3-TIER MEMORY STORAGE                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  TIER 1: CURATED FACTS (Permanent)                        importance ≥ 0.8 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  • Health conditions, allergies, medical constraints                   ││
+│  │  • Core dietary preferences (vegan, keto, halal)                       ││
+│  │  • Persistent fitness goals                                            ││
+│  │  → Stored in: user_profiles.curated_facts[]                            ││
+│  │  → TTL: None (permanent)                                               ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+│  TIER 2: DAILY FACTS (60-Day TTL)                     0.5 ≤ importance < 0.8│
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  • Recent preferences, temporary goals                                  ││
+│  │  • Brand preferences, flavor likes/dislikes                             ││
+│  │  • Seasonal or situational context                                      ││
+│  │  → Stored in: user_profiles.daily_facts[]                               ││
+│  │  → TTL: 60 days (auto-expired by MongoDB)                               ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+│  TIER 3: RAW HISTORY (Session-only)                                         │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  • Full conversation messages                                           ││
+│  │  • Pruned when exceeding token limits                                   ││
+│  │  • Summarized before deletion                                           ││
+│  │  → Stored in: conversations.history[]                                   ││
+│  │  → TTL: Session-based (pruned at 25+ messages)                          ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Fact Extraction Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    FACT EXTRACTION PIPELINE                                  │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. FLUSH HOOK TRIGGER                                                       │
+│     ┌─────────────────────────────────────────────────────────────────────┐ │
+│     │ ConversationStore._prune_history()                                  │ │
+│     │   → Triggered when history > 25 messages                            │ │
+│     │   → Calls _flush_memories() with pruned messages                    │ │
+│     └─────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│  2. FACT EXTRACTOR (Gemini 2.0 Flash)                                        │
+│     ┌─────────────────────────────────────────────────────────────────────┐ │
+│     │ FactExtractor.extract_facts(messages)                               │ │
+│     │   → Georgian-aware semantic analysis                                │ │
+│     │   → Returns: [{fact, importance, category}]                         │ │
+│     │   → Categories: preference, health, allergy, goal, behavior         │ │
+│     └─────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│  3. VECTOR EMBEDDING                                                         │
+│     ┌─────────────────────────────────────────────────────────────────────┐ │
+│     │ GeminiAdapter.embed_content(fact_text)                              │ │
+│     │   → 768-dimensional embedding vector                                │ │
+│     │   → Enables semantic similarity search                              │ │
+│     └─────────────────────────────────────────────────────────────────────┘ │
+│                              │                                               │
+│                              ▼                                               │
+│  4. TIERED STORAGE                                                           │
+│     ┌─────────────────────────────────────────────────────────────────────┐ │
+│     │ UserStore.add_user_fact(fact, importance, embedding)                │ │
+│     │   → importance ≥ 0.8 → curated_facts (permanent)                    │ │
+│     │   → importance < 0.8 → daily_facts (60-day TTL)                     │ │
+│     │   → health/allergy categories auto-boosted to curated               │ │
+│     └─────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Hybrid Search (Vector + Keyword)
+
+For product and fact retrieval, the system uses a hybrid scoring approach:
+
+```
+Final Score = (0.7 × Vector Score) + (0.3 × Keyword Score)
+```
+
+| Component | Weight | Description |
+|-----------|--------|-------------|
+| **Vector Score** | 0.7 | Cosine similarity from MongoDB Atlas Vector Search |
+| **Keyword Score** | 0.3 | BM25-lite text matching on product names/categories |
+
+**Why Hybrid?**
+- Pure vector search may miss exact brand name matches
+- Pure keyword search misses semantic intent ("protein for muscle" ≠ "whey")
+- 70/30 balance optimizes for Georgian nutrition domain
+
+### Memory v2.2: Context Compaction System
+
+When the context window reaches capacity (75% of 200k tokens), the **ContextCompactor** prevents overflow while preserving user knowledge.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    CONTEXT COMPACTION FLOW (v2.2)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Phase 2.5: Context Check (engine.py)                                        │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  tokens = TokenCounter.count_tokens(history)                            ││
+│  │  if tokens >= 150,000 (75% of 200k):                                     ││
+│  │      → Trigger ContextCompactor.compact()                               ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                              │                                               │
+│                              ▼                                               │
+│  Step 1: PRE-FLUSH SAFETY                                                    │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  Extract facts from old_messages BEFORE summarizing                     ││
+│  │  Save to MongoDB with $slice limit                                      ││
+│  │  ─────────────────────────────────────────────────────                  ││
+│  │  curated_facts: $slice = -100 (permanent, high importance)              ││
+│  │  daily_facts:   $slice = -200 (60-day TTL)                              ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                              │                                               │
+│                              ▼                                               │
+│  Step 2: SUMMARIZATION                                                       │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  Gemini summarizes old_messages in Georgian                             ││
+│  │  "[SUMMARY]კლიენტმა განიხილა პროტეინი...[/SUMMARY]"                    ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                              │                                               │
+│                              ▼                                               │
+│  Step 3: HISTORY REPLACEMENT                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │  new_history = [Summary message] + recent_messages                      ││
+│  │  Token count: 150,000 → ~50,000 (67% reduction)                         ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Components:**
+
+| Component | File | Function |
+|-----------|------|----------|
+| `ContextCompactor` | `app/memory/context_compactor.py` | Orchestrates compaction |
+| `TokenCounter` | `app/core/token_counter.py` | Tracks token usage |
+| `FactExtractor` | `app/memory/fact_extractor.py` | Extracts facts from messages |
+| `$slice` operator | `app/memory/mongo_store.py` | Prevents MongoDB array overflow |
+
+**Error Handling:**
+- If pre-flush fails → abort compaction, keep original history
+- If summarization fails → abort compaction, keep original history
+- User never sees degradation - graceful fallback guaranteed
+
+---
+
+### Context Injection
+
+User facts are injected into the system prompt via the `{{USER_FACTS}}` placeholder:
+
+```python
+# In engine.py
+def _build_system_instruction(self, context: RequestContext) -> str:
+    user_facts = self._format_user_facts(context)  # curated → daily → legacy
+    return base_instruction.replace("{{USER_FACTS}}", user_facts)
+```
+
+**Fact Prioritization:**
+1. `curated_facts` (max 5) — permanent, high-importance
+2. `daily_facts` (max 3) — recent, medium-importance  
+3. `user_facts` (max 3) — legacy compatibility
+
+---
+
 ## Data Flow (v3.0)
 
 ```

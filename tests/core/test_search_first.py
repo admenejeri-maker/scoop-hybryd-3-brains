@@ -7,6 +7,12 @@ Tests the _is_product_query() method to ensure:
 3. Non-product queries are not misclassified
 """
 
+import sys
+import os
+
+# Add backend root to path for app imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import pytest
 from unittest.mock import MagicMock, patch
 

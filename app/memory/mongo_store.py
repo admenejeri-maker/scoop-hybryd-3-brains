@@ -51,6 +51,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# TIERED MEMORY CONSTANTS
+# =============================================================================
+CURATED_IMPORTANCE_THRESHOLD = 0.8  # Facts >= this go to permanent curated_facts
+DAILY_FACTS_TTL_DAYS = 60           # Facts below threshold expire after this many days
+
 
 # =============================================================================
 # SCHEMA DEFINITIONS
@@ -299,6 +305,35 @@ class DatabaseManager:
         except OperationFailure as e:
             logger.warning(f"Index creation warning: {e}")
 
+    async def cleanup_expired_daily_facts(self) -> int:
+        """
+        Remove expired daily_facts entries from all users.
+        
+        This method should be called periodically via scheduler/cron.
+        Removes daily_facts where expires_at < now.
+        
+        Returns:
+            Number of users modified
+        """
+        from datetime import datetime
+        now = datetime.utcnow()
+        
+        try:
+            result = await self._db.users.update_many(
+                {"daily_facts.expires_at": {"$lt": now}},
+                {"$pull": {"daily_facts": {"expires_at": {"$lt": now}}}}
+            )
+            
+            if result.modified_count > 0:
+                logger.info(
+                    f"TTL cleanup: Removed expired daily_facts from {result.modified_count} users"
+                )
+            
+            return result.modified_count
+        except Exception as e:
+            logger.error(f"TTL cleanup failed: {e}")
+            return 0
+
     async def disconnect(self) -> None:
         """Close database connection"""
         if self._client:
@@ -352,6 +387,14 @@ class ConversationStore:
         """
         self.max_messages = max_messages
         self.max_tokens = max_tokens
+        self._user_store = None  # Lazy-loaded for flush functionality
+
+    @property
+    def user_store(self):
+        """Lazy-load UserStore for memory flush."""
+        if self._user_store is None:
+            self._user_store = UserStore()
+        return self._user_store
 
     @property
     def collection(self):
@@ -542,7 +585,7 @@ class ConversationStore:
         # Check if pruning needed
         summary = None
         if message_count > self.max_messages or token_estimate > self.max_tokens:
-            bson_history, summary = await self._prune_history(bson_history)
+            bson_history, summary = await self._prune_history(bson_history, user_id=user_id)
             token_estimate = self.estimate_tokens(bson_history)
             message_count = len(bson_history)
 
@@ -577,9 +620,14 @@ class ConversationStore:
             upsert=True
         )
 
+    # FIX #1: Eager extraction threshold (was 30, now 10)
+    EAGER_EXTRACTION_THRESHOLD = 10
+    PRUNE_KEEP_COUNT = 30
+
     async def _prune_history(
         self,
-        history: List[Dict[str, Any]]
+        history: List[Dict[str, Any]],
+        user_id: str  # FIX #3: Required user_id parameter
     ) -> tuple[List[Dict[str, Any]], str]:
         """
         ANSWER TO QUESTION #1: History pruning strategies
@@ -588,11 +636,19 @@ class ConversationStore:
         1. Sliding window: Keep last N messages
         2. Summarization: Generate summary of pruned messages
         3. Context pruning: Remove less important messages
+        4. Eager extraction: Flush memories after 10 messages (not 30)
 
-        Current strategy: Sliding window + Summary
+        Current strategy: Sliding window + Summary + Eager Extraction
         """
-        # Keep last 30 messages (15 exchanges) - reduced from 50 to prevent context confusion
-        keep_count = 30
+        keep_count = self.PRUNE_KEEP_COUNT
+        
+        # FIX #1: Eager extraction - flush memories even if not pruning
+        # This ensures facts are captured from shorter sessions
+        if len(history) > self.EAGER_EXTRACTION_THRESHOLD:
+            # Extract facts from recent messages (last 10) before they might be lost
+            recent_chunk = history[-self.EAGER_EXTRACTION_THRESHOLD:]
+            await self._flush_memories(recent_chunk, user_id=user_id)
+            logger.debug(f"Eager extraction triggered at {len(history)} messages")
 
         if len(history) <= keep_count:
             return history, None
@@ -601,13 +657,98 @@ class ConversationStore:
         old_messages = history[:-keep_count]
         new_messages = history[-keep_count:]
 
+        # PHASE 3: Flush memories before discarding old messages
+        # This extracts important facts before they are lost
+        await self._flush_memories(old_messages, user_id=user_id)
+
         # Generate summary of old messages
         # In production, you might call Gemini to summarize
         summary = self._generate_simple_summary(old_messages)
 
-        logger.info(f"Pruned history: {len(old_messages)} messages summarized")
+        logger.info(f"Pruned history: {len(old_messages)} messages summarized, memories flushed")
 
         return new_messages, summary
+
+    async def _flush_memories(self, messages: List[Dict[str, Any]], user_id: str) -> None:
+        """
+        PHASE 4: Extract and save facts from messages before pruning.
+        
+        Uses FactExtractor (Gemini Flash) to intelligently identify
+        permanent user attributes from conversation history.
+        
+        Args:
+            messages: Old messages about to be pruned
+            user_id: User ID to save facts for
+        """
+        if not messages:
+            return
+        
+        try:
+            # Lazy-load FactExtractor and embedding adapter
+            from app.memory.fact_extractor import FactExtractor
+            from app.adapters.gemini_adapter import create_gemini_adapter
+            
+            extractor = FactExtractor()
+            adapter = create_gemini_adapter()
+            
+            # Extract facts using Gemini
+            extracted_facts = await extractor.extract_facts(messages)
+            
+            if not extracted_facts:
+                logger.debug("No facts extracted from pruned messages")
+                return
+            
+            # Save each extracted fact
+            for fact_data in extracted_facts:
+                fact_text = fact_data.get("fact", "")
+                importance = fact_data.get("importance", 0.6)
+                category = fact_data.get("category", "preference")
+                
+                if len(fact_text) < 5:
+                    continue
+                
+                # Generate embedding for the fact with retry loop
+                embedding = None
+                for embed_attempt in range(3):
+                    try:
+                        embedding = await adapter.embed_content(fact_text)
+                        if embedding and len(embedding) == 768:
+                            break
+                    except Exception as embed_error:
+                        if embed_attempt == 2:
+                            logger.warning(
+                                f"⚠️ Embedding failed after 3 attempts for: {fact_text[:50]}... "
+                                f"Using zero-vector fallback. Error: {embed_error}"
+                            )
+                        else:
+                            await asyncio.sleep(0.5 * (embed_attempt + 1))
+                
+                # Skip saving facts we can't embed - they'll be unretrievable anyway
+                if not embedding or len(embedding) != 768:
+                    logger.error(
+                        f"❌ Skipping fact (embedding failed): {fact_text[:50]}..."
+                    )
+                    continue
+                
+                # Determine importance based on category
+                if category in ("health", "allergy"):
+                    importance = max(importance, 0.85)  # Health facts are curated
+                
+                try:
+                    await self.user_store.add_user_fact(
+                        user_id=user_id,
+                        fact=fact_text[:200],
+                        embedding=embedding,
+                        importance_score=importance,
+                        source="inferred",
+                        is_sensitive=(category == "health")
+                    )
+                    logger.info(f"Flushed extracted fact: {fact_text[:50]}... (importance={importance:.2f})")
+                except Exception as e:
+                    logger.warning(f"Failed to save extracted fact: {e}")
+                    
+        except Exception as e:
+            logger.error(f"Memory flush failed: {e}")
 
     def _generate_simple_summary(self, messages: List[Dict[str, Any]]) -> str:
         """
@@ -979,22 +1120,29 @@ class UserStore:
         if len(fact) < 10:
             return {"status": "error", "message": "Fact too short (min 10 chars)"}
         
-        if len(embedding) != 768:
-            return {"status": "error", "message": f"Invalid embedding dim: {len(embedding)}, expected 768"}
+        # Accept both 768-dim (old model) and 3072-dim (new gemini-embedding-001)
+        if len(embedding) not in (768, 3072):
+            return {"status": "error", "message": f"Invalid embedding dim: {len(embedding)}, expected 768 or 3072"}
         
-        # Check for duplicates using cosine similarity
+        # Check for duplicates using cosine similarity across ALL tiers
         user_doc = await self.get_user(user_id)
         
-        if user_doc and user_doc.get("user_facts"):
-            for existing_fact in user_doc["user_facts"]:
-                existing_embedding = existing_fact.get("embedding", [])
-                if existing_embedding:
-                    similarity = self._cosine_similarity(embedding, existing_embedding)
-                    if similarity > 0.90:
-                        return {
-                            "status": "duplicate",
-                            "message": f"Similar fact exists (similarity: {similarity:.2f}): {existing_fact['fact'][:50]}..."
-                        }
+        # Collect all existing facts from all tiers for deduplication
+        all_existing_facts = []
+        if user_doc:
+            all_existing_facts.extend(user_doc.get("curated_facts", []))
+            all_existing_facts.extend(user_doc.get("daily_facts", []))
+            all_existing_facts.extend(user_doc.get("user_facts", []))  # Legacy
+        
+        for existing_fact in all_existing_facts:
+            existing_embedding = existing_fact.get("embedding", [])
+            if existing_embedding:
+                similarity = self._cosine_similarity(embedding, existing_embedding)
+                if similarity > 0.90:
+                    return {
+                        "status": "duplicate",
+                        "message": f"Similar fact exists (similarity: {similarity:.2f}): {existing_fact['fact'][:50]}..."
+                    }
         
         # Add new fact
         fact_doc = {
@@ -1006,17 +1154,37 @@ class UserStore:
             "is_sensitive": is_sensitive
         }
         
+        # Tiered routing based on importance score
+        if importance_score >= CURATED_IMPORTANCE_THRESHOLD:
+            # High importance → permanent curated_facts
+            target_field = "curated_facts"
+        else:
+            # Lower importance → daily_facts with TTL
+            target_field = "daily_facts"
+            fact_doc["expires_at"] = datetime.utcnow() + timedelta(days=DAILY_FACTS_TTL_DAYS)
+
+        # Memory v2.2: Use $slice to prevent unbounded growth
+        # curated_facts: Keep last 100 (permanent, most important)
+        # daily_facts: Keep last 200 (TTL handles cleanup, but prevent burst)
+        slice_limit = -100 if target_field == "curated_facts" else -200
+
         result = await self.collection.update_one(
             {"user_id": user_id},
             {
-                "$push": {"user_facts": fact_doc},
+                "$push": {
+                    target_field: {
+                        "$each": [fact_doc],
+                        "$slice": slice_limit
+                    }
+                },
                 "$set": {"updated_at": datetime.utcnow()}
             },
             upsert=True
         )
         
         if result.modified_count > 0 or result.upserted_id is not None:
-            return {"status": "added", "message": f"Fact added: {fact[:50]}..."}
+            tier = "curated" if target_field == "curated_facts" else "daily"
+            return {"status": "added", "message": f"Fact added to {tier}: {fact[:50]}..."}
         return {"status": "error", "message": "Failed to add fact"}
 
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
@@ -1033,33 +1201,83 @@ class UserStore:
         
         return dot_product / (norm1 * norm2)
 
+    def _keyword_score(self, query: str, fact_text: str) -> float:
+        """
+        BM25-lite keyword scoring using token overlap.
+        
+        Returns ratio of query terms found in fact text (0.0 to 1.0).
+        Case-insensitive, supports multilingual text.
+        """
+        if not query or not fact_text:
+            return 0.0
+        
+        # Simple tokenization: lowercase and split on whitespace/punctuation
+        query_tokens = set(query.lower().split())
+        fact_tokens = set(fact_text.lower().split())
+        
+        if not query_tokens:
+            return 0.0
+        
+        # Token overlap ratio
+        matches = query_tokens & fact_tokens
+        
+        # Also check for partial matches (substring) for compound words
+        for qt in query_tokens:
+            for ft in fact_tokens:
+                if qt in ft or ft in qt:
+                    matches.add(qt)
+        
+        return len(matches) / len(query_tokens)
+
     async def get_relevant_facts(
         self,
         user_id: str,
         query_embedding: List[float],
         limit: int = 5,
-        min_similarity: float = 0.5
+        min_similarity: float = 0.5,
+        query_text: str = None
     ) -> List[Dict[str, Any]]:
         """
-        Get relevant facts using vector similarity search.
+        Get relevant facts using vector similarity search across ALL tiers.
+        
+        Searches: curated_facts, daily_facts, and legacy user_facts
         
         Args:
             user_id: User identifier
             query_embedding: 768-dim query vector
             limit: Max facts to return
             min_similarity: Minimum cosine similarity threshold
+            query_text: Optional raw text for hybrid keyword scoring
             
         Returns:
-            List of facts sorted by similarity (descending)
+            List of facts sorted by hybrid score (0.7*vector + 0.3*keyword)
         """
+        # Hybrid scoring weights
+        VECTOR_WEIGHT = 0.7
+        KEYWORD_WEIGHT = 0.3
         user_doc = await self.get_user(user_id)
         
-        if not user_doc or not user_doc.get("user_facts"):
+        if not user_doc:
+            return []
+        
+        # Collect facts from ALL tiers
+        all_facts = []
+        
+        # Priority order: curated first (most important), then daily, then legacy
+        for source, tier_name in [
+            (user_doc.get("curated_facts", []), "curated"),
+            (user_doc.get("daily_facts", []), "daily"),
+            (user_doc.get("user_facts", []), "legacy")  # Backward compatibility
+        ]:
+            for fact in source:
+                all_facts.append({**fact, "_tier": tier_name})
+        
+        if not all_facts:
             return []
         
         # Calculate similarity for each fact
         facts_with_similarity = []
-        for fact in user_doc["user_facts"]:
+        for fact in all_facts:
             embedding = fact.get("embedding", [])
             if embedding:
                 similarity = self._cosine_similarity(query_embedding, embedding)
@@ -1069,11 +1287,32 @@ class UserStore:
                         "similarity": round(similarity, 3),
                         "importance_score": fact.get("importance_score", 0.5),
                         "is_sensitive": fact.get("is_sensitive", False),
-                        "created_at": fact.get("created_at")
+                        "created_at": fact.get("created_at"),
+                        "_tier": fact["_tier"]
                     })
         
-        # Sort by similarity (descending) and return top N
-        facts_with_similarity.sort(key=lambda x: x["similarity"], reverse=True)
+        # Apply hybrid scoring if query_text provided
+        if query_text:
+            for fact in facts_with_similarity:
+                kw_score = self._keyword_score(query_text, fact["fact"])
+                fact["keyword_score"] = round(kw_score, 3)
+                fact["final_score"] = round(
+                    (VECTOR_WEIGHT * fact["similarity"]) + (KEYWORD_WEIGHT * kw_score), 3
+                )
+            # Sort by hybrid final_score
+            facts_with_similarity.sort(
+                key=lambda x: (x["final_score"], x["importance_score"]),
+                reverse=True
+            )
+        else:
+            # Pure vector similarity ranking
+            for fact in facts_with_similarity:
+                fact["final_score"] = fact["similarity"]
+            facts_with_similarity.sort(
+                key=lambda x: (x["similarity"], x["importance_score"]),
+                reverse=True
+            )
+        
         return facts_with_similarity[:limit]
 
     async def get_full_profile(self, user_id: str) -> Optional[Dict[str, Any]]:

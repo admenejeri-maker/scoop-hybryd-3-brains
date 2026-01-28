@@ -5,6 +5,12 @@ Tests for ThinkingManager (v2.0)
 Tests the Thinking UI strategy pattern implementation.
 """
 
+import sys
+import os
+
+# Add backend root to path for app imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import pytest
 import asyncio
 from unittest.mock import MagicMock
