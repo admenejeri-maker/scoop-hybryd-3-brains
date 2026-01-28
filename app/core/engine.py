@@ -526,7 +526,7 @@ class ConversationEngine:
             if (
                 state.last_finish_reason 
                 and "SAFETY" in state.last_finish_reason.upper()
-                and len(state.accumulated_text.strip()) < 300  # Raised from 100 - Georgian greetings are ~130 chars
+                and len(state.accumulated_text.strip()) < 800  # Raised from 300 - Georgian health content can be 300-800 chars before SAFETY
             ):
                 logger.warning(
                     f"⚠️ SAFETY detected with only {len(state.accumulated_text)} chars, "

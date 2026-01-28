@@ -2717,3 +2717,50 @@ from app.memory.context_compactor import ContextCompactor
 
 *Last Updated: January 28, 2026 ~23:35*
 
+---
+
+## Development Timeline: January 29, 2026 (~01:00-01:30)
+
+### Session: Text Truncation Bug #28 Fix (Phase 1)
+
+**Problem Reported:** ქართული ტექსტი იჭრებოდა ზოგიერთ პასუხში.
+
+---
+
+## Bug Log (January 29)
+
+### Bug #28: Georgian Text Truncation (CRITICAL)
+- **Symptom:** Complete responses (~1500+ chars) truncated for health queries
+- **Investigation:** `/debug` workflow with Deep Reasoning Protocol (DRP v3.0)
+- **Root Cause:**
+  1. Gemini returns `finish_reason=SAFETY` for health content
+  2. Backend `SAFETY` fallback triggers at 300 chars
+  3. Georgian health responses exceed 800 chars → wrongly flagged
+- **Fix:**
+  | File | Change |
+  |------|--------|
+  | `engine.py:529` | Threshold: 300 → 800 chars |
+  | `function_loop.py` | Added `finish_reason` in sync path |
+  | `test_engine_integration.py` | +4 integration tests |
+- **Status:** ✅ RESOLVED
+
+### Analysis: Gemini Content Filtering (NOT A BUG)
+- **Symptom:** API error on complex medical query
+- **Query:** პროტეინი თირკმელებს შლის + 10 კილო ერთ თვეში
+- **Verdict:** Expected Gemini content filtering, not a code bug
+- **Status:** ✅ No action needed
+
+---
+
+## Verification Results (January 29)
+
+| Metric | Result |
+|--------|--------|
+| Unit Tests | 167/167 ✅ |
+| Manual Testing | 11/12 (92%) ✅ |
+| Response Length | 1500+ chars verified ✅ |
+
+---
+
+*Last Updated: January 29, 2026 ~01:30*
+

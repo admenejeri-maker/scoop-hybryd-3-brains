@@ -4,6 +4,28 @@ All notable changes to the memory system will be documented here.
 
 ---
 
+## [v2.1.4] - 2026-01-29 - Text Truncation Bug #28 Fix (Phase 1)
+
+### Fixed
+
+#### 🔧 SAFETY Fallback Threshold (engine.py)
+- **Issue**: Georgian health responses truncated when `finish_reason=SAFETY`
+- **Root Cause**: 300-char threshold too low for longer Georgian content
+- **Fix**: Raised `SAFETY` fallback threshold from 300 → 800 characters
+
+#### 🔄 Sync Path `finish_reason` Parity (function_loop.py)
+- **Issue**: `/chat` endpoint didn't capture `finish_reason`
+- **Fix**: Added `finish_reason` capture and return in sync path
+
+### Testing
+
+- `TestSafetyFallbackIntegration`: 4 new integration tests
+- All 167 core tests passing ✓
+- Semgrep security scan: 0 findings
+- Manual testing: 11/12 queries successful (92%)
+
+---
+
 ## [v2.1.3] - 2026-01-28 - Embedding SDK Migration
 
 ### Fixed

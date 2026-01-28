@@ -295,6 +295,7 @@ class FunctionCallingLoop:
         function_calls: List[FunctionCall] = []
         thoughts: List[str] = []
         products: List[Dict[str, Any]] = []
+        last_finish_reason = None  # Bug #28 Fix: Capture finish_reason for SAFETY detection
 
         try:
             # Send message and get response
@@ -303,6 +304,12 @@ class FunctionCallingLoop:
             # Process response parts
             if hasattr(response, 'candidates') and response.candidates:
                 candidate = response.candidates[0]
+                
+                # Bug #28 Fix: Capture finish_reason from sync response
+                if hasattr(candidate, 'finish_reason') and candidate.finish_reason:
+                    last_finish_reason = str(candidate.finish_reason)
+                    logger.debug(f"🏁 Sync path finish_reason: {last_finish_reason}")
+                
                 if hasattr(candidate, 'content') and candidate.content:
                     # DEFENSIVE: Check parts is not None before iterating
                     parts = candidate.content.parts
@@ -356,6 +363,7 @@ class FunctionCallingLoop:
             function_calls=function_calls,
             products_found=products,
             thoughts=thoughts,
+            finish_reason=last_finish_reason,  # Bug #28 Fix: Include for SAFETY detection
         )
 
     async def _process_part(
